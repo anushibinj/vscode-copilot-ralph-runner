@@ -116,8 +116,8 @@ export function activate(context: vscode.ExtensionContext) {
 	// ── Status bar icon ────────────────────────────────────────────────────
 	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
 	statusBarItem.text = '$(rocket) RALPH';
-	statusBarItem.tooltip = 'RALPH Runner — click to open settings';
-	statusBarItem.command = 'ralph-runner.openSettings';
+	statusBarItem.tooltip = 'RALPH Runner — click to show commands';
+	statusBarItem.command = 'ralph-runner.showMenu';
 	statusBarItem.show();
 	context.subscriptions.push(statusBarItem);
 
@@ -128,7 +128,8 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ralph-runner.resetStep', () => resetStep()),
 		vscode.commands.registerCommand('ralph-runner.openSettings', () => {
 			vscode.commands.executeCommand('workbench.action.openSettings', 'ralph-runner');
-		})
+		}),
+		vscode.commands.registerCommand('ralph-runner.showMenu', () => showCommandMenu())
 	);
 
 	log('RALPH Runner extension activated.');
@@ -797,11 +798,40 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 	if (!statusBarItem) { return; }
 	if (state === 'running') {
 		statusBarItem.text = '$(sync~spin) RALPH';
-		statusBarItem.tooltip = 'RALPH Runner — migration in progress (click for settings)';
+		statusBarItem.tooltip = 'RALPH Runner — migration in progress (click for menu)';
 		statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 	} else {
 		statusBarItem.text = '$(rocket) RALPH';
-		statusBarItem.tooltip = 'RALPH Runner — click to open settings';
+		statusBarItem.tooltip = 'RALPH Runner — click to show commands';
 		statusBarItem.backgroundColor = undefined;
+	}
+}
+
+async function showCommandMenu(): Promise<void> {
+	const items: vscode.QuickPickItem[] = [
+		{ label: '$(play)  Start Migration', description: 'Begin or resume the autonomous migration loop' },
+		{ label: '$(debug-stop)  Stop Migration', description: 'Cancel the current migration run' },
+		{ label: '$(info)  Show Status', description: 'Display migration progress summary' },
+		{ label: '$(debug-restart)  Reset Step', description: 'Reset a completed or failed step to pending' },
+		{ label: '$(gear)  Open Settings', description: 'Configure RALPH Runner options' },
+	];
+
+	const selected = await vscode.window.showQuickPick(items, {
+		placeHolder: 'RALPH Runner — select a command',
+	});
+
+	if (!selected) { return; }
+
+	const commandMap: Record<string, string> = {
+		'$(play)  Start Migration': 'ralph-runner.start',
+		'$(debug-stop)  Stop Migration': 'ralph-runner.stop',
+		'$(info)  Show Status': 'ralph-runner.status',
+		'$(debug-restart)  Reset Step': 'ralph-runner.resetStep',
+		'$(gear)  Open Settings': 'ralph-runner.openSettings',
+	};
+
+	const cmd = commandMap[selected.label];
+	if (cmd) {
+		vscode.commands.executeCommand(cmd);
 	}
 }

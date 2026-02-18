@@ -32,6 +32,10 @@
       {
         "command": "ralph-runner.openSettings",
         "title": "RALPH: Open Settings"
+      },
+      {
+        "command": "ralph-runner.showMenu",
+        "title": "RALPH: Show Menu"
       }
     ],
     "configuration": {
