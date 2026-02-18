@@ -10,11 +10,11 @@ import * as path from 'path';
 // injecting Copilot chat tasks for each step. Fully resumable.
 // ────────────────────────────────────────────────────────────────────────────
 
-const MAX_AUTONOMOUS_LOOPS = 20;
+const MAX_AUTONOMOUS_LOOPS = 2;
 const LOOP_DELAY_MS = 3000; // settle time between iterations
 const COPILOT_RESPONSE_POLL_MS = 5000; // how often to poll for Copilot idle
 const COPILOT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min max per step
-const COPILOT_IDLE_THRESHOLD_MS = 15_000; // 15s of no workspace activity → assume Copilot is done
+const COPILOT_IDLE_THRESHOLD_MS = 30_000; // 30s of no workspace activity → assume Copilot is done
 const COPILOT_MIN_WAIT_MS = 15_000; // minimum wait for Copilot to start working
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -50,7 +50,8 @@ class ActivityTracker {
 		this.lastActivityTime = Date.now();
 		this.disposables.push(
 			vscode.workspace.onDidChangeTextDocument((e) => {
-				// Ignore our own state-file bookkeeping
+				// Only track real workspace files — ignore output channels, untitled docs, etc.
+				if (e.document.uri.scheme !== 'file') { return; }
 				if (e.document.uri.fsPath.endsWith('MIGRATION_STATE.md')) { return; }
 				this.lastActivityTime = Date.now();
 			}),
@@ -58,10 +59,16 @@ class ActivityTracker {
 			vscode.workspace.onDidDeleteFiles(() => { this.lastActivityTime = Date.now(); }),
 			vscode.workspace.onDidRenameFiles(() => { this.lastActivityTime = Date.now(); }),
 			vscode.workspace.onDidSaveTextDocument((doc) => {
+				if (doc.uri.scheme !== 'file') { return; }
 				if (doc.uri.fsPath.endsWith('MIGRATION_STATE.md')) { return; }
 				this.lastActivityTime = Date.now();
 			}),
-			vscode.window.onDidChangeActiveTextEditor(() => { this.lastActivityTime = Date.now(); }),
+			vscode.window.onDidChangeActiveTextEditor((editor) => {
+				// Only count switching to actual file editors, not output/chat panels
+				if (editor && editor.document.uri.scheme === 'file') {
+					this.lastActivityTime = Date.now();
+				}
+			}),
 			vscode.window.onDidOpenTerminal(() => { this.lastActivityTime = Date.now(); }),
 			vscode.window.onDidCloseTerminal(() => { this.lastActivityTime = Date.now(); })
 		);
