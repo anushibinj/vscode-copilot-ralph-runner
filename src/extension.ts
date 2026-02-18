@@ -10,12 +10,21 @@ import * as path from 'path';
 // injecting Copilot chat tasks for each step. Fully resumable.
 // ────────────────────────────────────────────────────────────────────────────
 
-const MAX_AUTONOMOUS_LOOPS = 2;
-const LOOP_DELAY_MS = 3000; // settle time between iterations
-const COPILOT_RESPONSE_POLL_MS = 5000; // how often to poll for Copilot idle
-const COPILOT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min max per step
-const COPILOT_IDLE_THRESHOLD_MS = 30_000; // 30s of no workspace activity → assume Copilot is done
-const COPILOT_MIN_WAIT_MS = 15_000; // minimum wait for Copilot to start working
+// ── Configuration helpers ───────────────────────────────────────────────────
+// All tunables are read from VS Code settings (ralph-runner.*) so users can
+// adjust them through the Settings UI.  Defaults match the original constants.
+
+function getConfig() {
+	const cfg = vscode.workspace.getConfiguration('ralph-runner');
+	return {
+		MAX_AUTONOMOUS_LOOPS: cfg.get<number>('maxAutonomousLoops', 2),
+		LOOP_DELAY_MS: cfg.get<number>('loopDelayMs', 3000),
+		COPILOT_RESPONSE_POLL_MS: cfg.get<number>('copilotResponsePollMs', 5000),
+		COPILOT_TIMEOUT_MS: cfg.get<number>('copilotTimeoutMs', 600000),
+		COPILOT_IDLE_THRESHOLD_MS: cfg.get<number>('copilotIdleThresholdMs', 30000),
+		COPILOT_MIN_WAIT_MS: cfg.get<number>('copilotMinWaitMs', 15000),
+	};
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -97,17 +106,29 @@ let cancelToken: vscode.CancellationTokenSource | null = null;
 let isRunning = false;
 let activityTracker: ActivityTracker | null = null;
 let copilotRequestActive = false;
+let statusBarItem: vscode.StatusBarItem;
 
 // ── Activation ──────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
 	outputChannel = vscode.window.createOutputChannel('RALPH Runner');
 
+	// ── Status bar icon ────────────────────────────────────────────────────
+	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+	statusBarItem.text = '$(rocket) RALPH';
+	statusBarItem.tooltip = 'RALPH Runner — click to open settings';
+	statusBarItem.command = 'ralph-runner.openSettings';
+	statusBarItem.show();
+	context.subscriptions.push(statusBarItem);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('ralph-runner.start', () => startRalph()),
 		vscode.commands.registerCommand('ralph-runner.stop', () => stopRalph()),
 		vscode.commands.registerCommand('ralph-runner.status', () => showStatus()),
-		vscode.commands.registerCommand('ralph-runner.resetStep', () => resetStep())
+		vscode.commands.registerCommand('ralph-runner.resetStep', () => resetStep()),
+		vscode.commands.registerCommand('ralph-runner.openSettings', () => {
+			vscode.commands.executeCommand('workbench.action.openSettings', 'ralph-runner');
+		})
 	);
 
 	log('RALPH Runner extension activated.');
@@ -115,6 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
 	stopRalph();
+	statusBarItem?.dispose();
 	outputChannel?.dispose();
 }
 
@@ -140,13 +162,17 @@ async function startRalph(): Promise<void> {
 		return;
 	}
 
+	const config = getConfig();
+
 	isRunning = true;
 	cancelToken = new vscode.CancellationTokenSource();
 	outputChannel.show(true);
 	log('═══════════════════════════════════════════════════');
 	log('RALPH Runner started — autonomous migration agent');
-	log(`Max loops: ${MAX_AUTONOMOUS_LOOPS}`);
+	log(`Max loops: ${config.MAX_AUTONOMOUS_LOOPS}`);
 	log('═══════════════════════════════════════════════════');
+
+	updateStatusBar('running');
 
 	const steps = parsePlan(planPath);
 	if (steps.length === 0) {
@@ -162,7 +188,7 @@ async function startRalph(): Promise<void> {
 
 	let loopsExecuted = 0;
 
-	while (loopsExecuted < MAX_AUTONOMOUS_LOOPS && isRunning) {
+	while (loopsExecuted < config.MAX_AUTONOMOUS_LOOPS && isRunning) {
 		if (cancelToken?.token.isCancellationRequested) {
 			log('Cancelled by user.');
 			break;
@@ -187,7 +213,7 @@ async function startRalph(): Promise<void> {
 		}
 
 		log('');
-		log(`──── Loop ${loopsExecuted + 1}/${MAX_AUTONOMOUS_LOOPS} ────`);
+		log(`──── Loop ${loopsExecuted + 1}/${config.MAX_AUTONOMOUS_LOOPS} ────`);
 		log(`Step ${stepDef.id}: [${stepDef.action}] ${stepDef.description}`);
 		log(`Phase: ${stepDef.phase}`);
 
@@ -228,13 +254,13 @@ async function startRalph(): Promise<void> {
 		updateQuickStatus(statePath);
 
 		// Small delay to let VS Code settle
-		await sleep(LOOP_DELAY_MS);
+		await sleep(config.LOOP_DELAY_MS);
 	}
 
-	if (loopsExecuted >= MAX_AUTONOMOUS_LOOPS && isRunning) {
-		log(`Reached MAX_AUTONOMOUS_LOOPS (${MAX_AUTONOMOUS_LOOPS}). Pausing. Run 'RALPH: Start' to continue.`);
+	if (loopsExecuted >= config.MAX_AUTONOMOUS_LOOPS && isRunning) {
+		log(`Reached MAX_AUTONOMOUS_LOOPS (${config.MAX_AUTONOMOUS_LOOPS}). Pausing. Run 'RALPH: Start' to continue.`);
 		vscode.window.showInformationMessage(
-			`RALPH paused after ${MAX_AUTONOMOUS_LOOPS} steps. Run 'RALPH: Start' to resume.`
+			`RALPH paused after ${config.MAX_AUTONOMOUS_LOOPS} steps. Run 'RALPH: Start' to resume.`
 		);
 	}
 
@@ -243,6 +269,7 @@ async function startRalph(): Promise<void> {
 	copilotRequestActive = false;
 	isRunning = false;
 	cancelToken = null;
+	updateStatusBar('idle');
 }
 
 function stopRalph(): void {
@@ -254,6 +281,7 @@ function stopRalph(): void {
 	isRunning = false;
 	log('RALPH Runner stopped by user.');
 	vscode.window.showInformationMessage('RALPH stopped.');
+	updateStatusBar('idle');
 }
 
 // ── Step Execution ──────────────────────────────────────────────────────────
@@ -426,36 +454,37 @@ async function sendToCopilot(prompt: string): Promise<void> {
  * idle period with no workspace changes.
  */
 async function waitForCopilotCompletion(): Promise<void> {
+	const config = getConfig();
 	log('  Waiting for Copilot to finish processing...');
 
 	const startTime = Date.now();
 
-	while (Date.now() - startTime < COPILOT_TIMEOUT_MS) {
+	while (Date.now() - startTime < config.COPILOT_TIMEOUT_MS) {
 		if (cancelToken?.token.isCancellationRequested) {
 			copilotRequestActive = false;
 			throw new Error('Cancelled by user');
 		}
 
-		await sleep(COPILOT_RESPONSE_POLL_MS);
+		await sleep(config.COPILOT_RESPONSE_POLL_MS);
 		const elapsed = Date.now() - startTime;
 
 		// Enforce a minimum wait so Copilot has time to begin working
-		if (elapsed < COPILOT_MIN_WAIT_MS) {
-			log(`  … still within minimum wait (${Math.round(elapsed / 1000)}s / ${COPILOT_MIN_WAIT_MS / 1000}s)`);
+		if (elapsed < config.COPILOT_MIN_WAIT_MS) {
+			log(`  … still within minimum wait (${Math.round(elapsed / 1000)}s / ${config.COPILOT_MIN_WAIT_MS / 1000}s)`);
 			continue;
 		}
 
 		// After the minimum wait, require a sustained idle period
 		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (idleMs >= COPILOT_IDLE_THRESHOLD_MS) {
+		if (idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
 			log(`  Copilot appears done — no workspace activity for ${Math.round(idleMs / 1000)}s (elapsed ${Math.round(elapsed / 1000)}s)`);
 			return;
 		}
 
-		log(`  … Copilot still active (idle ${Math.round(idleMs / 1000)}s < threshold ${COPILOT_IDLE_THRESHOLD_MS / 1000}s, elapsed ${Math.round(elapsed / 1000)}s)`);
+		log(`  … Copilot still active (idle ${Math.round(idleMs / 1000)}s < threshold ${config.COPILOT_IDLE_THRESHOLD_MS / 1000}s, elapsed ${Math.round(elapsed / 1000)}s)`);
 	}
 
-	log(`  Copilot timed out after ${COPILOT_TIMEOUT_MS / 1000}s — proceeding.`);
+	log(`  Copilot timed out after ${config.COPILOT_TIMEOUT_MS / 1000}s — proceeding.`);
 }
 
 /**
@@ -463,11 +492,12 @@ async function waitForCopilotCompletion(): Promise<void> {
  * Checks both our own copilotRequestActive flag and workspace activity.
  */
 async function ensureCopilotIdle(): Promise<void> {
+	const config = getConfig();
 	if (!copilotRequestActive) {
 		// Quick path: we don't think Copilot is busy
 		// Still do a brief activity check in case something is happening
 		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (idleMs >= COPILOT_IDLE_THRESHOLD_MS) {
+		if (idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
 			return; // Copilot is idle
 		}
 	}
@@ -475,15 +505,15 @@ async function ensureCopilotIdle(): Promise<void> {
 	log('  ⏳ Copilot appears busy — waiting for it to become idle (polling every 5s)...');
 	const waitStart = Date.now();
 
-	while (Date.now() - waitStart < COPILOT_TIMEOUT_MS) {
+	while (Date.now() - waitStart < config.COPILOT_TIMEOUT_MS) {
 		if (cancelToken?.token.isCancellationRequested) {
 			throw new Error('Cancelled by user');
 		}
 
-		await sleep(COPILOT_RESPONSE_POLL_MS);
+		await sleep(config.COPILOT_RESPONSE_POLL_MS);
 
 		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (!copilotRequestActive && idleMs >= COPILOT_IDLE_THRESHOLD_MS) {
+		if (!copilotRequestActive && idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
 			const waited = Math.round((Date.now() - waitStart) / 1000);
 			log(`  ✓ Copilot is now idle (waited ${waited}s)`);
 			return;
@@ -761,4 +791,17 @@ function log(message: string): void {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function updateStatusBar(state: 'idle' | 'running'): void {
+	if (!statusBarItem) { return; }
+	if (state === 'running') {
+		statusBarItem.text = '$(sync~spin) RALPH';
+		statusBarItem.tooltip = 'RALPH Runner — migration in progress (click for settings)';
+		statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+	} else {
+		statusBarItem.text = '$(rocket) RALPH';
+		statusBarItem.tooltip = 'RALPH Runner — click to open settings';
+		statusBarItem.backgroundColor = undefined;
+	}
 }

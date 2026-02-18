@@ -28,8 +28,53 @@
       {
         "command": "ralph-runner.resetStep",
         "title": "RALPH: Reset Step"
+      },
+      {
+        "command": "ralph-runner.openSettings",
+        "title": "RALPH: Open Settings"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "RALPH Runner",
+      "properties": {
+        "ralph-runner.maxAutonomousLoops": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "Maximum number of steps to execute per run before pausing."
+        },
+        "ralph-runner.loopDelayMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 0,
+          "description": "Settle time in milliseconds between iterations."
+        },
+        "ralph-runner.copilotResponsePollMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1000,
+          "description": "How often (ms) to poll for Copilot idle state."
+        },
+        "ralph-runner.copilotTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 30000,
+          "description": "Maximum time (ms) to wait for Copilot per step (default 10 min)."
+        },
+        "ralph-runner.copilotIdleThresholdMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 5000,
+          "description": "Duration of no workspace activity (ms) before assuming Copilot is done."
+        },
+        "ralph-runner.copilotMinWaitMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 0,
+          "description": "Minimum time (ms) to wait for Copilot to start working before checking idle."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
