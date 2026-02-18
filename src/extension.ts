@@ -3,11 +3,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 // ────────────────────────────────────────────────────────────────────────────
-// RALPH Runner — Autonomous Migration Agent for VS Code
+// RALPH Runner — Autonomous Task Runner for VS Code
 //
-// Reads MIGRATION_PLAN.md for step definitions and MIGRATION_STATE.md for
-// persistent progress tracking. Loops autonomously (up to MAX_AUTONOMOUS_LOOPS)
-// injecting Copilot chat tasks for each step. Fully resumable.
+// Reads PLAN.md for step definitions and STATUS.md for persistent progress
+// tracking. Loops autonomously (up to MAX_AUTONOMOUS_LOOPS) injecting
+// Copilot chat tasks for each step. Fully resumable.
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Configuration helpers ───────────────────────────────────────────────────
@@ -28,7 +28,7 @@ function getConfig() {
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-interface MigrationStep {
+interface PlanStep {
 	id: number;
 	phase: string;
 	action: string; // "run_terminal" | "create_file" | "copilot_task"
@@ -61,7 +61,7 @@ class ActivityTracker {
 			vscode.workspace.onDidChangeTextDocument((e) => {
 				// Only track real workspace files — ignore output channels, untitled docs, etc.
 				if (e.document.uri.scheme !== 'file') { return; }
-				if (e.document.uri.fsPath.endsWith('MIGRATION_STATE.md')) { return; }
+				if (e.document.uri.fsPath.endsWith('STATUS.md')) { return; }
 				this.lastActivityTime = Date.now();
 			}),
 			vscode.workspace.onDidCreateFiles(() => { this.lastActivityTime = Date.now(); }),
@@ -69,7 +69,7 @@ class ActivityTracker {
 			vscode.workspace.onDidRenameFiles(() => { this.lastActivityTime = Date.now(); }),
 			vscode.workspace.onDidSaveTextDocument((doc) => {
 				if (doc.uri.scheme !== 'file') { return; }
-				if (doc.uri.fsPath.endsWith('MIGRATION_STATE.md')) { return; }
+				if (doc.uri.fsPath.endsWith('STATUS.md')) { return; }
 				this.lastActivityTime = Date.now();
 			}),
 			vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -156,11 +156,11 @@ async function startRalph(): Promise<void> {
 		return;
 	}
 
-	const planPath = path.join(workspaceRoot, 'MIGRATION_PLAN.md');
-	const statePath = path.join(workspaceRoot, 'MIGRATION_STATE.md');
+	const planPath = path.join(workspaceRoot, 'PLAN.md');
+	const statePath = path.join(workspaceRoot, 'STATUS.md');
 
 	if (!fs.existsSync(planPath) || !fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('MIGRATION_PLAN.md or MIGRATION_STATE.md not found in workspace root.');
+		vscode.window.showErrorMessage('PLAN.md or STATUS.md not found in workspace root.');
 		return;
 	}
 
@@ -170,7 +170,7 @@ async function startRalph(): Promise<void> {
 	cancelToken = new vscode.CancellationTokenSource();
 	outputChannel.show(true);
 	log('═══════════════════════════════════════════════════');
-	log('RALPH Runner started — autonomous migration agent');
+	log('RALPH Runner started — autonomous task runner');
 	log(`Max loops: ${config.MAX_AUTONOMOUS_LOOPS}`);
 	log('═══════════════════════════════════════════════════');
 
@@ -178,11 +178,11 @@ async function startRalph(): Promise<void> {
 
 	const steps = parsePlan(planPath);
 	if (steps.length === 0) {
-		log('ERROR: Could not parse any steps from MIGRATION_PLAN.md');
+		log('ERROR: Could not parse any steps from PLAN.md');
 		isRunning = false;
 		return;
 	}
-	log(`Loaded ${steps.length} steps from MIGRATION_PLAN.md`);
+	log(`Loaded ${steps.length} steps from PLAN.md`);
 
 	// Start global activity tracker for the duration of this run
 	activityTracker?.dispose();
@@ -201,15 +201,15 @@ async function startRalph(): Promise<void> {
 		const nextStep = findNextPending(trackedSteps);
 
 		if (!nextStep) {
-			log('🎉 All steps completed! Migration finished.');
-			vscode.window.showInformationMessage('RALPH: All migration steps completed!');
+			log('🎉 All steps completed!');
+			vscode.window.showInformationMessage('RALPH: All steps completed!');
 			break;
 		}
 
 		const stepDef = steps.find(s => s.id === nextStep.id);
 		if (!stepDef) {
 			log(`ERROR: Step ${nextStep.id} exists in state but not in plan. Marking skipped.`);
-			updateStepStatus(statePath, nextStep.id, 'skipped', 'Step not found in MIGRATION_PLAN.md');
+			updateStepStatus(statePath, nextStep.id, 'skipped', 'Step not found in PLAN.md');
 			loopsExecuted++;
 			continue;
 		}
@@ -252,7 +252,7 @@ async function startRalph(): Promise<void> {
 
 		loopsExecuted++;
 
-		// Update the quick status summary in MIGRATION_STATE.md
+		// Update the quick status summary in STATUS.md
 		updateQuickStatus(statePath);
 
 		// Small delay to let VS Code settle
@@ -288,7 +288,7 @@ function stopRalph(): void {
 
 // ── Step Execution ──────────────────────────────────────────────────────────
 
-async function executeStep(step: MigrationStep, workspaceRoot: string): Promise<void> {
+async function executeStep(step: PlanStep, workspaceRoot: string): Promise<void> {
 	switch (step.action) {
 		case 'run_terminal':
 			await executeTerminal(step, workspaceRoot);
@@ -304,7 +304,7 @@ async function executeStep(step: MigrationStep, workspaceRoot: string): Promise<
 	}
 }
 
-async function executeTerminal(step: MigrationStep, workspaceRoot: string): Promise<void> {
+async function executeTerminal(step: PlanStep, workspaceRoot: string): Promise<void> {
 	const command = step.command;
 	if (!command) {
 		throw new Error('run_terminal step has no command');
@@ -348,7 +348,7 @@ async function executeTerminal(step: MigrationStep, workspaceRoot: string): Prom
 	});
 }
 
-async function executeCreateFile(step: MigrationStep, workspaceRoot: string): Promise<void> {
+async function executeCreateFile(step: PlanStep, workspaceRoot: string): Promise<void> {
 	if (!step.path) {
 		throw new Error('create_file step has no path');
 	}
@@ -359,7 +359,7 @@ async function executeCreateFile(step: MigrationStep, workspaceRoot: string): Pr
 	await sendToCopilot(prompt);
 }
 
-async function executeCopilotTask(step: MigrationStep, workspaceRoot: string): Promise<void> {
+async function executeCopilotTask(step: PlanStep, workspaceRoot: string): Promise<void> {
 	const prompt = buildCopilotPrompt(step, workspaceRoot);
 	log('  Delegating task to Copilot...');
 	await sendToCopilot(prompt);
@@ -367,9 +367,9 @@ async function executeCopilotTask(step: MigrationStep, workspaceRoot: string): P
 
 // ── Copilot Integration ─────────────────────────────────────────────────────
 
-function buildCopilotPrompt(step: MigrationStep, workspaceRoot: string): string {
+function buildCopilotPrompt(step: PlanStep, workspaceRoot: string): string {
 	const stateSnippet = [
-		`You are executing Step ${step.id} of the Case360 Java EE → Spring Boot migration plan.`,
+		`You are executing Step ${step.id} of the current plan.`,
 		`Phase: ${step.phase}`,
 		`Action: ${step.action}`,
 		`Description: ${step.description}`,
@@ -532,7 +532,7 @@ async function ensureCopilotIdle(): Promise<void> {
 // Requirement 3: Before executing any step, do a quick check to see if the
 // step's outcome already exists in the workspace (regardless of state file).
 
-async function verifyStepAlreadyDone(step: MigrationStep, workspaceRoot: string): Promise<boolean> {
+async function verifyStepAlreadyDone(step: PlanStep, workspaceRoot: string): Promise<boolean> {
 	switch (step.action) {
 		case 'create_file': {
 			if (!step.path) { return false; }
@@ -593,30 +593,30 @@ async function verifyStepAlreadyDone(step: MigrationStep, workspaceRoot: string)
 	}
 }
 
-// ── MIGRATION_PLAN.md Parser ────────────────────────────────────────────────
+// ── PLAN.md Parser ──────────────────────────────────────────────────────────
 
-function parsePlan(planPath: string): MigrationStep[] {
+function parsePlan(planPath: string): PlanStep[] {
 	const content = fs.readFileSync(planPath, 'utf-8');
 
 	// Extract the JSON block between ```json and ```
 	const jsonMatch = content.match(/```json\s*\n([\s\S]*?)\n```/);
 	if (!jsonMatch) {
-		log('ERROR: Could not find ```json block in MIGRATION_PLAN.md');
+		log('ERROR: Could not find ```json block in PLAN.md');
 		return [];
 	}
 
 	try {
 		const parsed = JSON.parse(jsonMatch[1]);
-		const steps: MigrationStep[] = parsed.steps || [];
+		const steps: PlanStep[] = parsed.steps || [];
 		return steps;
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e);
-		log(`ERROR: Failed to parse JSON from MIGRATION_PLAN.md: ${msg}`);
+		log(`ERROR: Failed to parse JSON from PLAN.md: ${msg}`);
 		return [];
 	}
 }
 
-// ── MIGRATION_STATE.md Parser & Writer ──────────────────────────────────────
+// ── STATUS.md Parser & Writer ────────────────────────────────────────────────
 
 function parseState(statePath: string): TrackedStep[] {
 	const content = fs.readFileSync(statePath, 'utf-8');
@@ -709,9 +709,9 @@ async function showStatus(): Promise<void> {
 	const workspaceRoot = getWorkspaceRoot();
 	if (!workspaceRoot) { return; }
 
-	const statePath = path.join(workspaceRoot, 'MIGRATION_STATE.md');
+	const statePath = path.join(workspaceRoot, 'STATUS.md');
 	if (!fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('MIGRATION_STATE.md not found.');
+		vscode.window.showErrorMessage('STATUS.md not found.');
 		return;
 	}
 
@@ -723,7 +723,7 @@ async function showStatus(): Promise<void> {
 	const nextPending = tracked.find(s => s.status === 'pending');
 
 	const lines = [
-		`RALPH Migration Status`,
+		`RALPH Status`,
 		``,
 		`✅ Completed: ${completed}/${tracked.length}`,
 		`❌ Failed: ${failed}`,
@@ -746,9 +746,9 @@ async function resetStep(): Promise<void> {
 	const workspaceRoot = getWorkspaceRoot();
 	if (!workspaceRoot) { return; }
 
-	const statePath = path.join(workspaceRoot, 'MIGRATION_STATE.md');
+	const statePath = path.join(workspaceRoot, 'STATUS.md');
 	if (!fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('MIGRATION_STATE.md not found.');
+		vscode.window.showErrorMessage('STATUS.md not found.');
 		return;
 	}
 
@@ -799,7 +799,7 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 	if (!statusBarItem) { return; }
 	if (state === 'running') {
 		statusBarItem.text = '$(sync~spin) RALPH';
-		statusBarItem.tooltip = 'RALPH Runner — migration in progress (click for menu)';
+		statusBarItem.tooltip = 'RALPH Runner — task in progress (click for menu)';
 		statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 	} else {
 		statusBarItem.text = '$(rocket) RALPH';
@@ -810,10 +810,10 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 
 async function showCommandMenu(): Promise<void> {
 	const items: vscode.QuickPickItem[] = [
-		{ label: '$(zap)  Quick Start', description: 'Set up migration plan & state files (or generate them via Copilot)' },
-		{ label: '$(play)  Start Migration', description: 'Begin or resume the autonomous migration loop' },
-		{ label: '$(debug-stop)  Stop Migration', description: 'Cancel the current migration run' },
-		{ label: '$(info)  Show Status', description: 'Display migration progress summary' },
+		{ label: '$(zap)  Quick Start', description: 'Set up plan & status files (or generate them via Copilot)' },
+		{ label: '$(play)  Start', description: 'Begin or resume the autonomous task loop' },
+		{ label: '$(debug-stop)  Stop', description: 'Cancel the current run' },
+		{ label: '$(info)  Show Status', description: 'Display step progress summary' },
 		{ label: '$(debug-restart)  Reset Step', description: 'Reset a completed or failed step to pending' },
 		{ label: '$(gear)  Open Settings', description: 'Configure RALPH Runner options' },
 	];
@@ -826,8 +826,8 @@ async function showCommandMenu(): Promise<void> {
 
 	const commandMap: Record<string, string> = {
 		'$(zap)  Quick Start': 'ralph-runner.quickStart',
-		'$(play)  Start Migration': 'ralph-runner.start',
-		'$(debug-stop)  Stop Migration': 'ralph-runner.stop',
+		'$(play)  Start': 'ralph-runner.start',
+		'$(debug-stop)  Stop': 'ralph-runner.stop',
 		'$(info)  Show Status': 'ralph-runner.status',
 		'$(debug-restart)  Reset Step': 'ralph-runner.resetStep',
 		'$(gear)  Open Settings': 'ralph-runner.openSettings',
@@ -840,7 +840,7 @@ async function showCommandMenu(): Promise<void> {
 }
 
 // ── Quick Start ─────────────────────────────────────────────────────────────
-// Guides the user through setting up MIGRATION_PLAN.md and MIGRATION_STATE.md.
+// Guides the user through setting up PLAN.md and STATUS.md.
 // 1. Checks if the files already exist in the workspace root.
 // 2. If missing, asks the user to provide paths to existing files.
 // 3. If the user doesn't have them, asks what they want to accomplish and
@@ -858,25 +858,25 @@ async function quickStart(): Promise<void> {
 	log('RALPH Quick Start');
 	log('═══════════════════════════════════════════════════');
 
-	const planPath = path.join(workspaceRoot, 'MIGRATION_PLAN.md');
-	const statePath = path.join(workspaceRoot, 'MIGRATION_STATE.md');
+	const planPath = path.join(workspaceRoot, 'PLAN.md');
+	const statePath = path.join(workspaceRoot, 'STATUS.md');
 
 	const planExists = fs.existsSync(planPath);
 	const stateExists = fs.existsSync(statePath);
 
 	// ── Case 1: Both files already exist ────────────────────────────────────
 	if (planExists && stateExists) {
-		log('Both MIGRATION_PLAN.md and MIGRATION_STATE.md already exist.');
+		log('Both PLAN.md and STATUS.md already exist.');
 		const action = await vscode.window.showInformationMessage(
-			'RALPH: MIGRATION_PLAN.md and MIGRATION_STATE.md already exist in the workspace root.',
-			'Start Migration', 'Open Plan', 'Open State'
+			'RALPH: PLAN.md and STATUS.md already exist in the workspace root.',
+			'Start', 'Open Plan', 'Open Status'
 		);
-		if (action === 'Start Migration') {
+		if (action === 'Start') {
 			vscode.commands.executeCommand('ralph-runner.start');
 		} else if (action === 'Open Plan') {
 			const doc = await vscode.workspace.openTextDocument(planPath);
 			vscode.window.showTextDocument(doc);
-		} else if (action === 'Open State') {
+		} else if (action === 'Open Status') {
 			const doc = await vscode.workspace.openTextDocument(statePath);
 			vscode.window.showTextDocument(doc);
 		}
@@ -885,8 +885,8 @@ async function quickStart(): Promise<void> {
 
 	// ── Case 2: One or both files missing — ask user how to proceed ─────────
 	const missingFiles: string[] = [];
-	if (!planExists) { missingFiles.push('MIGRATION_PLAN.md'); }
-	if (!stateExists) { missingFiles.push('MIGRATION_STATE.md'); }
+	if (!planExists) { missingFiles.push('PLAN.md'); }
+	if (!stateExists) { missingFiles.push('STATUS.md'); }
 
 	log(`Missing: ${missingFiles.join(', ')}`);
 
@@ -894,12 +894,12 @@ async function quickStart(): Promise<void> {
 		[
 			{
 				label: '$(file-directory) I have these files — let me provide the path',
-				description: 'Browse for existing MIGRATION_PLAN.md and MIGRATION_STATE.md files',
+				description: 'Browse for existing PLAN.md and STATUS.md files',
 				value: 'provide'
 			},
 			{
 				label: '$(sparkle) I don\'t have them — generate via Copilot',
-				description: 'Describe your migration goal and let Copilot create both files',
+				description: 'Describe your goal and let Copilot create both files',
 				value: 'generate'
 			}
 		],
@@ -916,7 +916,7 @@ async function quickStart(): Promise<void> {
 }
 
 /**
- * Let the user browse for existing MIGRATION_PLAN.md / MIGRATION_STATE.md files
+ * Let the user browse for existing PLAN.md / STATUS.md files
  * and copy them into the workspace root.
  */
 async function quickStartProvideFiles(
@@ -925,45 +925,45 @@ async function quickStartProvideFiles(
 ): Promise<void> {
 	if (!planExists) {
 		const uris = await vscode.window.showOpenDialog({
-			title: 'Select your MIGRATION_PLAN.md file',
+			title: 'Select your PLAN.md file',
 			canSelectMany: false,
 			canSelectFolders: false,
 			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
-			openLabel: 'Select MIGRATION_PLAN.md'
+			openLabel: 'Select PLAN.md'
 		});
 		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no MIGRATION_PLAN.md selected.');
+			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no PLAN.md selected.');
 			return;
 		}
 		const srcPath = uris[0].fsPath;
 		fs.copyFileSync(srcPath, planPath);
-		log(`Copied MIGRATION_PLAN.md from ${srcPath}`);
+		log(`Copied PLAN.md from ${srcPath}`);
 	}
 
 	if (!stateExists) {
 		const uris = await vscode.window.showOpenDialog({
-			title: 'Select your MIGRATION_STATE.md file',
+			title: 'Select your STATUS.md file',
 			canSelectMany: false,
 			canSelectFolders: false,
 			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
-			openLabel: 'Select MIGRATION_STATE.md'
+			openLabel: 'Select STATUS.md'
 		});
 		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no MIGRATION_STATE.md selected.');
+			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no STATUS.md selected.');
 			return;
 		}
 		const srcPath = uris[0].fsPath;
 		fs.copyFileSync(srcPath, statePath);
-		log(`Copied MIGRATION_STATE.md from ${srcPath}`);
+		log(`Copied STATUS.md from ${srcPath}`);
 	}
 
-	vscode.window.showInformationMessage('RALPH: Migration files are ready! You can now run "RALPH: Start Migration".');
+	vscode.window.showInformationMessage('RALPH: Plan and status files are ready! You can now run "RALPH: Start".');
 	log('Quick Start complete — files placed in workspace root.');
 }
 
 /**
  * Ask the user what they want to accomplish, then send a Copilot prompt that
- * generates both MIGRATION_PLAN.md and MIGRATION_STATE.md in the expected
+ * generates both PLAN.md and STATUS.md in the expected
  * formats used by the RALPH Runner extension.
  */
 async function quickStartGenerate(
@@ -971,8 +971,8 @@ async function quickStartGenerate(
 ): Promise<void> {
 	const userGoal = await vscode.window.showInputBox({
 		title: 'RALPH Quick Start — Describe your goal',
-		prompt: 'What are you trying to accomplish? (e.g. "Migrate a Java EE 8 app to Spring Boot 3", "Convert a jQuery front-end to React")',
-		placeHolder: 'Describe the migration or transformation you want to perform…',
+		prompt: 'What are you trying to accomplish? (e.g. "Fix all TypeScript errors", "Add unit tests for all services", "Migrate from jQuery to React")',
+		placeHolder: 'Describe what you want to accomplish…',
 		ignoreFocusOut: true
 	});
 
@@ -1005,14 +1005,14 @@ async function quickStartGenerate(
 	}
 
 	vscode.window.showInformationMessage(
-		'RALPH: Copilot is generating your migration files. Once they appear in the workspace root, run "RALPH: Start Migration".'
+		'RALPH: Copilot is generating your plan files. Once they appear in the workspace root, run "RALPH: Start".'
 	);
 	log('Quick Start prompt sent to Copilot. Waiting for file generation…');
 }
 
 /**
- * Builds the Copilot prompt that instructs it to generate MIGRATION_PLAN.md
- * and MIGRATION_STATE.md in the exact formats the RALPH Runner expects.
+ * Builds the Copilot prompt that instructs it to generate PLAN.md
+ * and STATUS.md in the exact formats the RALPH Runner expects.
  */
 function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string {
 	return [
@@ -1025,7 +1025,7 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		`Please analyze the workspace and generate TWO files in the workspace root:`,
 		``,
 		`────────────────────────────────────────────────────`,
-		`FILE 1: MIGRATION_PLAN.md`,
+		`FILE 1: PLAN.md`,
 		`────────────────────────────────────────────────────`,
 		``,
 		`This file must contain a \`\`\`json code block with the following structure:`,
@@ -1035,7 +1035,7 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		`  "steps": [`,
 		`    {`,
 		`      "id": 1,`,
-		`      "phase": "Phase name (e.g. Setup, Analysis, Migration, Testing)",`,
+		`      "phase": "Phase name (e.g. Setup, Analysis, Implementation, Testing)",`,
 		`      "action": "run_terminal | create_file | copilot_task",`,
 		`      "command": "(only for run_terminal) the shell command to run",`,
 		`      "path": "(only for create_file) relative path of the file to create",`,
@@ -1056,7 +1056,7 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		`Number steps sequentially starting from 1.`,
 		``,
 		`────────────────────────────────────────────────────`,
-		`FILE 2: MIGRATION_STATE.md`,
+		`FILE 2: STATUS.md`,
 		`────────────────────────────────────────────────────`,
 		``,
 		`This file tracks progress. It MUST contain:`,
@@ -1086,7 +1086,7 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		``,
 		`IMPORTANT:`,
 		`- Create BOTH files at the workspace root: ${workspaceRoot}`,
-		`- The JSON in MIGRATION_PLAN.md must be inside a \`\`\`json fenced code block`,
+		`- The JSON in PLAN.md must be inside a \`\`\`json fenced code block`,
 		`- The state table rows must follow the exact pipe-delimited format shown above`,
 		`- Be thorough: include all necessary steps for the user's goal`,
 		`- Actually create the files — do not just show their content`,

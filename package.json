@@ -1,7 +1,7 @@
 {
   "name": "ralph-runner",
   "displayName": "ralph-runner",
-  "description": "Autonomous migration agent — reads MIGRATION_PLAN.md, tracks state in MIGRATION_STATE.md, injects Copilot tasks in a loop",
+  "description": "Autonomous task runner — reads PLAN.md, tracks progress in STATUS.md, and drives Copilot Chat to execute each step in an automated loop",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.109.0"
@@ -15,11 +15,11 @@
     "commands": [
       {
         "command": "ralph-runner.start",
-        "title": "RALPH: Start Migration"
+        "title": "RALPH: Start"
       },
       {
         "command": "ralph-runner.stop",
-        "title": "RALPH: Stop Migration"
+        "title": "RALPH: Stop"
       },
       {
         "command": "ralph-runner.status",
