@@ -607,12 +607,13 @@ function parseState(statePath: string): TrackedStep[] {
 }
 
 function findNextPending(tracked: TrackedStep[]): TrackedStep | null {
-	// First, check if any step is in-progress (resume it)
-	const inProgress = tracked.find(s => s.status === 'in-progress');
-	if (inProgress) { return inProgress; }
+	// Sort by step ID so we always scan from Step 1 upward
+	const sorted = [...tracked].sort((a, b) => a.id - b.id);
 
-	// Then find the first pending step
-	return tracked.find(s => s.status === 'pending') || null;
+	// Walk through every step in order and return the first one that
+	// is NOT done and NOT skipped. This catches earlier steps that were
+	// missed even if later steps are already complete.
+	return sorted.find(s => s.status !== 'done' && s.status !== 'skipped') || null;
 }
 
 function updateStepStatus(statePath: string, stepId: number, status: StepStatus, notes: string): void {
