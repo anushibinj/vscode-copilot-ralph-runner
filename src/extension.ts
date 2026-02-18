@@ -129,7 +129,8 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ralph-runner.openSettings', () => {
 			vscode.commands.executeCommand('workbench.action.openSettings', 'ralph-runner');
 		}),
-		vscode.commands.registerCommand('ralph-runner.showMenu', () => showCommandMenu())
+		vscode.commands.registerCommand('ralph-runner.showMenu', () => showCommandMenu()),
+		vscode.commands.registerCommand('ralph-runner.quickStart', () => quickStart())
 	);
 
 	log('RALPH Runner extension activated.');
@@ -809,6 +810,7 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 
 async function showCommandMenu(): Promise<void> {
 	const items: vscode.QuickPickItem[] = [
+		{ label: '$(zap)  Quick Start', description: 'Set up migration plan & state files (or generate them via Copilot)' },
 		{ label: '$(play)  Start Migration', description: 'Begin or resume the autonomous migration loop' },
 		{ label: '$(debug-stop)  Stop Migration', description: 'Cancel the current migration run' },
 		{ label: '$(info)  Show Status', description: 'Display migration progress summary' },
@@ -823,6 +825,7 @@ async function showCommandMenu(): Promise<void> {
 	if (!selected) { return; }
 
 	const commandMap: Record<string, string> = {
+		'$(zap)  Quick Start': 'ralph-runner.quickStart',
 		'$(play)  Start Migration': 'ralph-runner.start',
 		'$(debug-stop)  Stop Migration': 'ralph-runner.stop',
 		'$(info)  Show Status': 'ralph-runner.status',
@@ -834,4 +837,258 @@ async function showCommandMenu(): Promise<void> {
 	if (cmd) {
 		vscode.commands.executeCommand(cmd);
 	}
+}
+
+// ── Quick Start ─────────────────────────────────────────────────────────────
+// Guides the user through setting up MIGRATION_PLAN.md and MIGRATION_STATE.md.
+// 1. Checks if the files already exist in the workspace root.
+// 2. If missing, asks the user to provide paths to existing files.
+// 3. If the user doesn't have them, asks what they want to accomplish and
+//    uses Copilot to generate both files in the expected format.
+
+async function quickStart(): Promise<void> {
+	const workspaceRoot = getWorkspaceRoot();
+	if (!workspaceRoot) {
+		vscode.window.showErrorMessage('No workspace folder open.');
+		return;
+	}
+
+	outputChannel.show(true);
+	log('═══════════════════════════════════════════════════');
+	log('RALPH Quick Start');
+	log('═══════════════════════════════════════════════════');
+
+	const planPath = path.join(workspaceRoot, 'MIGRATION_PLAN.md');
+	const statePath = path.join(workspaceRoot, 'MIGRATION_STATE.md');
+
+	const planExists = fs.existsSync(planPath);
+	const stateExists = fs.existsSync(statePath);
+
+	// ── Case 1: Both files already exist ────────────────────────────────────
+	if (planExists && stateExists) {
+		log('Both MIGRATION_PLAN.md and MIGRATION_STATE.md already exist.');
+		const action = await vscode.window.showInformationMessage(
+			'RALPH: MIGRATION_PLAN.md and MIGRATION_STATE.md already exist in the workspace root.',
+			'Start Migration', 'Open Plan', 'Open State'
+		);
+		if (action === 'Start Migration') {
+			vscode.commands.executeCommand('ralph-runner.start');
+		} else if (action === 'Open Plan') {
+			const doc = await vscode.workspace.openTextDocument(planPath);
+			vscode.window.showTextDocument(doc);
+		} else if (action === 'Open State') {
+			const doc = await vscode.workspace.openTextDocument(statePath);
+			vscode.window.showTextDocument(doc);
+		}
+		return;
+	}
+
+	// ── Case 2: One or both files missing — ask user how to proceed ─────────
+	const missingFiles: string[] = [];
+	if (!planExists) { missingFiles.push('MIGRATION_PLAN.md'); }
+	if (!stateExists) { missingFiles.push('MIGRATION_STATE.md'); }
+
+	log(`Missing: ${missingFiles.join(', ')}`);
+
+	const choice = await vscode.window.showQuickPick(
+		[
+			{
+				label: '$(file-directory) I have these files — let me provide the path',
+				description: 'Browse for existing MIGRATION_PLAN.md and MIGRATION_STATE.md files',
+				value: 'provide'
+			},
+			{
+				label: '$(sparkle) I don\'t have them — generate via Copilot',
+				description: 'Describe your migration goal and let Copilot create both files',
+				value: 'generate'
+			}
+		],
+		{ placeHolder: `${missingFiles.join(' and ')} not found in workspace root. How would you like to proceed?` }
+	);
+
+	if (!choice) { return; }
+
+	if (choice.value === 'provide') {
+		await quickStartProvideFiles(planPath, statePath, planExists, stateExists);
+	} else {
+		await quickStartGenerate(planPath, statePath, workspaceRoot);
+	}
+}
+
+/**
+ * Let the user browse for existing MIGRATION_PLAN.md / MIGRATION_STATE.md files
+ * and copy them into the workspace root.
+ */
+async function quickStartProvideFiles(
+	planPath: string, statePath: string,
+	planExists: boolean, stateExists: boolean
+): Promise<void> {
+	if (!planExists) {
+		const uris = await vscode.window.showOpenDialog({
+			title: 'Select your MIGRATION_PLAN.md file',
+			canSelectMany: false,
+			canSelectFolders: false,
+			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
+			openLabel: 'Select MIGRATION_PLAN.md'
+		});
+		if (!uris || uris.length === 0) {
+			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no MIGRATION_PLAN.md selected.');
+			return;
+		}
+		const srcPath = uris[0].fsPath;
+		fs.copyFileSync(srcPath, planPath);
+		log(`Copied MIGRATION_PLAN.md from ${srcPath}`);
+	}
+
+	if (!stateExists) {
+		const uris = await vscode.window.showOpenDialog({
+			title: 'Select your MIGRATION_STATE.md file',
+			canSelectMany: false,
+			canSelectFolders: false,
+			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
+			openLabel: 'Select MIGRATION_STATE.md'
+		});
+		if (!uris || uris.length === 0) {
+			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no MIGRATION_STATE.md selected.');
+			return;
+		}
+		const srcPath = uris[0].fsPath;
+		fs.copyFileSync(srcPath, statePath);
+		log(`Copied MIGRATION_STATE.md from ${srcPath}`);
+	}
+
+	vscode.window.showInformationMessage('RALPH: Migration files are ready! You can now run "RALPH: Start Migration".');
+	log('Quick Start complete — files placed in workspace root.');
+}
+
+/**
+ * Ask the user what they want to accomplish, then send a Copilot prompt that
+ * generates both MIGRATION_PLAN.md and MIGRATION_STATE.md in the expected
+ * formats used by the RALPH Runner extension.
+ */
+async function quickStartGenerate(
+	planPath: string, statePath: string, workspaceRoot: string
+): Promise<void> {
+	const userGoal = await vscode.window.showInputBox({
+		title: 'RALPH Quick Start — Describe your goal',
+		prompt: 'What are you trying to accomplish? (e.g. "Migrate a Java EE 8 app to Spring Boot 3", "Convert a jQuery front-end to React")',
+		placeHolder: 'Describe the migration or transformation you want to perform…',
+		ignoreFocusOut: true
+	});
+
+	if (!userGoal || userGoal.trim().length === 0) {
+		vscode.window.showWarningMessage('RALPH Quick Start cancelled — no goal provided.');
+		return;
+	}
+
+	log(`User goal: ${userGoal}`);
+	log('Sending generation prompt to Copilot…');
+
+	const prompt = buildQuickStartPrompt(userGoal, workspaceRoot);
+
+	try {
+		await vscode.commands.executeCommand('workbench.action.chat.open', {
+			query: prompt,
+			isPartialQuery: false
+		});
+	} catch {
+		try {
+			await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
+			await sleep(1000);
+			await vscode.commands.executeCommand('workbench.action.chat.open', prompt);
+		} catch {
+			log('WARNING: Could not programmatically send to Copilot. Copying to clipboard.');
+			await vscode.env.clipboard.writeText(prompt);
+			await vscode.commands.executeCommand('workbench.action.chat.open');
+			vscode.window.showInformationMessage('RALPH: Prompt copied to clipboard — paste it into Copilot Chat.');
+		}
+	}
+
+	vscode.window.showInformationMessage(
+		'RALPH: Copilot is generating your migration files. Once they appear in the workspace root, run "RALPH: Start Migration".'
+	);
+	log('Quick Start prompt sent to Copilot. Waiting for file generation…');
+}
+
+/**
+ * Builds the Copilot prompt that instructs it to generate MIGRATION_PLAN.md
+ * and MIGRATION_STATE.md in the exact formats the RALPH Runner expects.
+ */
+function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string {
+	return [
+		`The user wants to accomplish the following goal:`,
+		``,
+		`> ${userGoal}`,
+		``,
+		`Workspace root: ${workspaceRoot}`,
+		``,
+		`Please analyze the workspace and generate TWO files in the workspace root:`,
+		``,
+		`────────────────────────────────────────────────────`,
+		`FILE 1: MIGRATION_PLAN.md`,
+		`────────────────────────────────────────────────────`,
+		``,
+		`This file must contain a \`\`\`json code block with the following structure:`,
+		``,
+		'```',
+		`{`,
+		`  "steps": [`,
+		`    {`,
+		`      "id": 1,`,
+		`      "phase": "Phase name (e.g. Setup, Analysis, Migration, Testing)",`,
+		`      "action": "run_terminal | create_file | copilot_task",`,
+		`      "command": "(only for run_terminal) the shell command to run",`,
+		`      "path": "(only for create_file) relative path of the file to create",`,
+		`      "instruction": "(only for copilot_task) detailed instruction for Copilot",`,
+		`      "description": "Human-readable description of what this step does"`,
+		`    }`,
+		`  ]`,
+		`}`,
+		'```',
+		``,
+		`Action types:`,
+		`- "run_terminal": executes a shell command (requires "command" field)`,
+		`- "create_file": creates a file at the given path (requires "path" field)`,
+		`- "copilot_task": a general Copilot coding task (requires "instruction" field)`,
+		``,
+		`The plan should have a logical sequence of steps organized into phases.`,
+		`Each step should be granular enough to be independently executable and verifiable.`,
+		`Number steps sequentially starting from 1.`,
+		``,
+		`────────────────────────────────────────────────────`,
+		`FILE 2: MIGRATION_STATE.md`,
+		`────────────────────────────────────────────────────`,
+		``,
+		`This file tracks progress. It MUST contain:`,
+		``,
+		`1. A Quick Status section with this exact table format:`,
+		``,
+		`| Metric | Count |`,
+		`|--------|-------|`,
+		`| Total Steps | <N> |`,
+		`| Completed | 0 |`,
+		`| In Progress | 0 |`,
+		`| Failed | 0 |`,
+		`| Pending | <N> |`,
+		``,
+		`**Current Phase:** Step 1`,
+		`**Last Completed Step:** —`,
+		``,
+		`2. A detailed step tracking table with this exact format:`,
+		``,
+		`| Step | Phase | Action | Status | Timestamp | Notes |`,
+		`|------|-------|--------|--------|-----------|-------|`,
+		`| 1 | Phase name | \`action\` — description | \`pending\` | | |`,
+		``,
+		`One row per step matching the plan. All steps should start as \`pending\`.`,
+		``,
+		`────────────────────────────────────────────────────`,
+		``,
+		`IMPORTANT:`,
+		`- Create BOTH files at the workspace root: ${workspaceRoot}`,
+		`- The JSON in MIGRATION_PLAN.md must be inside a \`\`\`json fenced code block`,
+		`- The state table rows must follow the exact pipe-delimited format shown above`,
+		`- Be thorough: include all necessary steps for the user's goal`,
+		`- Actually create the files — do not just show their content`,
+	].join('\n');
 }

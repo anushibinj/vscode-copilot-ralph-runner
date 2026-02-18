@@ -36,6 +36,10 @@
       {
         "command": "ralph-runner.showMenu",
         "title": "RALPH: Show Menu"
+      },
+      {
+        "command": "ralph-runner.quickStart",
+        "title": "RALPH: Quick Start"
       }
     ],
     "configuration": {
