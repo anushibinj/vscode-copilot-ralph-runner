@@ -394,8 +394,11 @@ function buildCopilotPrompt(step: PlanStep, workspaceRoot: string): string {
 				'',
 				step.instruction || step.description,
 				'',
-				'Perform ALL changes described. Do not ask questions — execute directly.',
+				'Greedily execute as many sub-tasks as possible in a single pass.',
+				'If something partially fails, keep all the parts that passed and do not revert them.',
+				'Do not ask questions — execute directly.',
 				'Make the actual code changes to the files in the workspace.',
+				'Mark the task as in-progress in STATUS.md and exit when done.',
 				'After completing all changes, confirm what was done.'
 			);
 			break;
