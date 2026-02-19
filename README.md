@@ -8,18 +8,31 @@ Use it for migrations, bug fixes, feature implementation, refactoring, test crea
 
 ## Features
 
-- **Autonomous looping** — Executes up to a configurable number of steps per run (default: 2), then pauses for review before continuing.
+- **Autonomous looping** — Executes steps in automated loops with fully configurable parameters through VS Code settings.
+- **Comprehensive configuration system** — All behavior parameters are configurable via VS Code settings:
+    - Maximum loops per run (default: 2)
+    - Loop delays and polling intervals
+    - Copilot timeout and idle thresholds
+    - Minimum wait times
 - **Three action types:**
-    - `copilot_task` — Sends a detailed prompt to Copilot Chat and waits for it to finish making changes.
-    - `run_terminal` — Opens a terminal, runs a shell command, and waits for completion.
+    - `copilot_task` — Sends detailed prompts to Copilot Chat with intelligent completion detection.
+    - `run_terminal` — Opens terminals, executes shell commands with **PowerShell compatibility** (auto-converts `&&` to `;`).
     - `create_file` — Delegates file creation to Copilot with contextual instructions.
-- **Activity-based completion detection** — Monitors workspace events (file edits, file creation, terminal activity) to determine when Copilot has finished processing a step.
+- **Advanced Activity Tracker** — Monitors comprehensive workspace events to detect when Copilot is actively working:
+    - File edits, creation, deletion, and renames
+    - File saves and active editor changes
+    - Terminal opens and closes
+    - Intelligently excludes status file updates and non-workspace files
+- **Intelligent Copilot integration** — Ensures reliable task handoffs:
+    - Waits for Copilot to be idle before sending new tasks
+    - Activity-based completion detection with configurable thresholds
+    - Timeout protection and minimum wait enforcement
 - **Persistent status tracking** — All progress is written to `STATUS.md` so you can stop, restart VS Code, or resume at any time.
-- **Smart skip detection** — Before executing a step, RALPH checks whether the outcome already exists (e.g., file already created, directory already exists, `node_modules` already installed) and skips it automatically.
-- **Fully resumable** — If a step is left `in-progress`, RALPH picks it up on the next start. Failed steps are logged and skipped so the pipeline continues.
-- **Quick Start workflow** — Easily generate or import `PLAN.md` and `STATUS.md` using the built-in Quick Start, including Copilot-powered plan generation from a user goal.
-- **Status bar integration** — Shows RALPH's current state and provides quick access to commands.
-- **Comprehensive status and reset commands** — View progress, reset steps, and manage the plan directly from the command palette or status bar menu.
+- **Smart skip detection** — Before executing a step, RALPH verifies whether the outcome already exists and skips automatically.
+- **Fully resumable** — Picks up in-progress steps on restart. Failed steps are logged and skipped so pipelines continue.
+- **Quick Start workflow** — Generate or import `PLAN.md` and `STATUS.md` using built-in Quick Start with Copilot-powered plan generation.
+- **Enhanced status bar integration** — Visual state indicators (idle/running) with one-click access to the command menu.
+- **Comprehensive management tools** — View progress, reset steps, and configure settings through command palette or status bar.
 
 ## Requirements
 
@@ -83,37 +96,68 @@ It also looks for a quick-status summary section with lines like `| Total Steps 
 
 ## Usage
 
-1. Create `PLAN.md` and `STATUS.md` in your workspace root (see formats above), or use **RALPH: Quick Start** to generate them.
-2. Open the Command Palette (`Ctrl+Shift+P`) or use the status bar menu to run RALPH commands.
-3. RALPH will begin processing pending steps, logging progress to the **RALPH Runner** output channel.
-4. After the configured number of steps, RALPH pauses — review the changes, then run **RALPH: Start** again to continue.
+1. **Setup files**: Create `PLAN.md` and `STATUS.md` in your workspace root (see formats above), or use **RALPH: Quick Start** (appears as "Generate plan" in status bar menu) to set them up automatically.
+2. **Run RALPH**: Open Command Palette (`Ctrl+Shift+P`) → type "RALPH: Start", or click the RALPH status bar icon → "Start".
+3. **Monitor progress**: RALPH logs all activity to the **RALPH Runner** output channel and updates the status bar icon (🚀 idle → 🔄 running).
+4. **Continue execution**: After the configured number of steps, RALPH pauses — review changes, then run "RALPH: Start" again to continue with the next batch of steps.
 
 ## Commands
 
-| Command                | Description                                                                     |
-| ---------------------- | ------------------------------------------------------------------------------- |
-| `RALPH: Start`         | Begin (or resume) the autonomous loop from the next pending step.               |
-| `RALPH: Stop`          | Cancel the current run immediately.                                             |
-| `RALPH: Show Status`   | Display a summary of step progress in the output channel and as a notification. |
-| `RALPH: Reset Step`    | Pick a completed, failed, or in-progress step and reset it back to `pending`.   |
-| `RALPH: Quick Start`   | Set up plan & status files — provide existing ones or generate via Copilot.     |
-| `RALPH: Open Settings` | Configure RALPH Runner options.                                                 |
-| Status Bar Menu        | Access all commands and see current state from the VS Code status bar.          |
+### Available Commands
+
+| Command (Command Palette) | Status Bar Menu Label       | Description                                                                                                                                                   |
+| ------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RALPH: Start`            | $(play) Start               | **Begin or resume** the autonomous loop from the next pending/in-progress step. Processes up to the configured number of steps before pausing.                |
+| `RALPH: Stop`             | $(debug-stop) Stop          | **Cancel immediately** — stops the current execution and marks the running step as failed.                                                                    |
+| `RALPH: Show Status`      | $(info) Show Status         | **View progress summary** — displays step counts, current phase, and next pending step in both output channel and notification.                               |
+| `RALPH: Reset Step`       | $(debug-restart) Reset Step | **Reset step status** — choose any completed, failed, or in-progress step to reset back to `pending` for re-execution.                                        |
+| `RALPH: Quick Start`      | $(zap) Generate plan        | **Setup wizard** — guides you through creating `PLAN.md` and `STATUS.md`. Can import existing files or generate new ones via Copilot from a goal description. |
+| `RALPH: Open Settings`    | $(gear) Open Settings       | **Configure behavior** — opens VS Code settings for RALPH Runner to adjust timeouts, loop limits, thresholds, and delays.                                     |
+
+### Access Methods
+
+- **Command Palette**: `Ctrl+Shift+P` then type "RALPH" to see all commands
+- **Status Bar**: Click the RALPH icon (🚀 when idle, 🔄 when running) for the quick menu
+- **Keyboard**: All commands are available through VS Code's command palette and can be assigned keyboard shortcuts
+
+### Configurable Settings
+
+Access via `RALPH: Open Settings` or VS Code Settings → Extensions → RALPH Runner:
+
+| Setting                  | Default | Description                                          |
+| ------------------------ | ------- | ---------------------------------------------------- |
+| `maxAutonomousLoops`     | 2       | Maximum steps to execute per run before pausing      |
+| `loopDelayMs`            | 3000    | Delay between steps (milliseconds)                   |
+| `copilotResponsePollMs`  | 5000    | How often to check Copilot status (milliseconds)     |
+| `copilotTimeoutMs`       | 600000  | Maximum time to wait for Copilot (10 minutes)        |
+| `copilotIdleThresholdMs` | 30000   | Idle time before considering Copilot done (30s)      |
+| `copilotMinWaitMs`       | 15000   | Minimum wait time for Copilot to start working (15s) |
 
 ## How it works
 
-1. **Parse** — RALPH reads the JSON step definitions from `PLAN.md` and the current status from `STATUS.md`.
-2. **Find next step** — It looks for the first `in-progress` step (to resume) or the first `pending` step.
-3. **Verify** — Before executing, it checks whether the step's outcome already exists in the workspace (smart skip).
-4. **Execute** — Depending on the action type, RALPH either runs a terminal command, or sends a prompt to Copilot Chat and waits.
-5. **Wait for completion** — For Copilot tasks, RALPH monitors workspace activity (file edits, saves, terminal events). Once no activity is detected for a configurable idle period (default: 30 seconds, after a minimum 15-second wait), it considers the step complete.
-6. **Update status** — The step is marked `done` or `failed` in `STATUS.md`, and the quick-status summary is refreshed.
-7. **Loop** — Repeat from step 2 until the loop limit is reached or all steps are done.
+1. **Parse** — RALPH reads JSON step definitions from `PLAN.md` and current status from `STATUS.md`.
+2. **Find next step** — Locates the first `in-progress` step (to resume) or first `pending` step in sequence.
+3. **Verify** — Before executing, checks whether the step's outcome already exists in the workspace (smart skip).
+4. **Wait for idle state** — For Copilot tasks, ensures Copilot is not busy before sending new work.
+5. **Execute** — Depending on action type:
+    - `run_terminal`: Creates terminal, runs command (with PowerShell compatibility), waits for completion marker
+    - `create_file` or `copilot_task`: Sends contextual prompt to Copilot Chat
+6. **Monitor completion** — For Copilot tasks, uses advanced activity tracking:
+    - Monitors file edits, saves, creates, deletes, renames
+    - Tracks editor changes and terminal activity
+    - Enforces minimum wait time (15s) for Copilot to begin
+    - Considers task complete after sustained idle period (30s with no workspace activity)
+    - Times out after maximum period (10 minutes) if needed
+7. **Update status** — Step is marked `done` or `failed` in `STATUS.md`, quick-status summary refreshed.
+8. **Loop** — Repeat from step 2 until loop limit reached or all steps complete.
 
 ## Known Issues
 
-- Copilot completion detection is heuristic-based (workspace activity monitoring). In rare cases, RALPH may consider Copilot done prematurely if there is a long pause between file edits, or it may wait unnecessarily if unrelated workspace activity occurs.
-- Terminal command completion relies on timeouts rather than exit-code detection, so long-running commands may be marked complete before they finish.
+- **Copilot completion detection** is heuristic-based (workspace activity monitoring). The advanced activity tracker minimizes false positives, but rare edge cases may occur:
+    - Premature completion if Copilot pauses longer than the idle threshold (configurable)
+    - Delayed completion if unrelated workspace activity occurs during idle detection
+- **Terminal command completion** uses completion markers rather than exit-code detection. Commands that don't respond to input may appear to hang.
+- **PowerShell compatibility** automatically converts `&&` to `;`, but other shell-specific syntax differences may require manual plan adjustments.
 
 ## Release Notes
 
