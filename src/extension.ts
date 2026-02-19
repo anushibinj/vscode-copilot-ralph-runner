@@ -8,11 +8,13 @@ import * as path from 'path';
 // Reads PLAN.md for step definitions and STATUS.md for persistent progress
 // tracking. Loops autonomously (up to MAX_AUTONOMOUS_LOOPS) injecting
 // Copilot chat tasks for each step. Fully resumable.
+//
+// Task execution state is persisted in the .ralph directory:
+//   .ralph/task-<id>-status  →  "inprogress" | "completed"
+// This provides a reliable, crash-safe lock that prevents overlapping tasks.
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Configuration helpers ───────────────────────────────────────────────────
-// All tunables are read from VS Code settings (ralph-runner.*) so users can
-// adjust them through the Settings UI.  Defaults match the original constants.
 
 function getConfig() {
 	const cfg = vscode.workspace.getConfiguration('ralph-runner');
@@ -21,7 +23,6 @@ function getConfig() {
 		LOOP_DELAY_MS: cfg.get<number>('loopDelayMs', 3000),
 		COPILOT_RESPONSE_POLL_MS: cfg.get<number>('copilotResponsePollMs', 5000),
 		COPILOT_TIMEOUT_MS: cfg.get<number>('copilotTimeoutMs', 600000),
-		COPILOT_IDLE_THRESHOLD_MS: cfg.get<number>('copilotIdleThresholdMs', 30000),
 		COPILOT_MIN_WAIT_MS: cfg.get<number>('copilotMinWaitMs', 15000),
 	};
 }
@@ -47,55 +48,142 @@ interface TrackedStep {
 	notes: string;
 }
 
-// ── Activity Tracker ────────────────────────────────────────────────────────
-// Monitors workspace events (file edits, file creation, terminal activity) to
-// determine whether Copilot is still actively working on a task.
+// ── Filesystem Task State Manager ────────────────────────────────────────────
+// Manages .ralph/task-<id>-status files to provide a durable, process-safe
+// execution lock.  File content is either "inprogress" or "completed".
 
-class ActivityTracker {
-	private lastActivityTime: number;
-	private disposables: vscode.Disposable[] = [];
+const RALPH_DIR = '.ralph';
 
-	constructor() {
-		this.lastActivityTime = Date.now();
-		this.disposables.push(
-			vscode.workspace.onDidChangeTextDocument((e) => {
-				// Only track real workspace files — ignore output channels, untitled docs, etc.
-				if (e.document.uri.scheme !== 'file') { return; }
-				if (e.document.uri.fsPath.endsWith('STATUS.md')) { return; }
-				this.lastActivityTime = Date.now();
-			}),
-			vscode.workspace.onDidCreateFiles(() => { this.lastActivityTime = Date.now(); }),
-			vscode.workspace.onDidDeleteFiles(() => { this.lastActivityTime = Date.now(); }),
-			vscode.workspace.onDidRenameFiles(() => { this.lastActivityTime = Date.now(); }),
-			vscode.workspace.onDidSaveTextDocument((doc) => {
-				if (doc.uri.scheme !== 'file') { return; }
-				if (doc.uri.fsPath.endsWith('STATUS.md')) { return; }
-				this.lastActivityTime = Date.now();
-			}),
-			vscode.window.onDidChangeActiveTextEditor((editor) => {
-				// Only count switching to actual file editors, not output/chat panels
-				if (editor && editor.document.uri.scheme === 'file') {
-					this.lastActivityTime = Date.now();
-				}
-			}),
-			vscode.window.onDidOpenTerminal(() => { this.lastActivityTime = Date.now(); }),
-			vscode.window.onDidCloseTerminal(() => { this.lastActivityTime = Date.now(); })
+class RalphStateManager {
+
+	/** Absolute path to the .ralph directory for the workspace. */
+	static getRalphDir(workspaceRoot: string): string {
+		return path.join(workspaceRoot, RALPH_DIR);
+	}
+
+	/** Absolute path to the status file for a given task id. */
+	static getTaskStatusPath(workspaceRoot: string, taskId: number): string {
+		return path.join(RalphStateManager.getRalphDir(workspaceRoot), `task-${taskId}-status`);
+	}
+
+	/**
+	 * Ensure the .ralph directory exists.  Safe to call multiple times.
+	 */
+	static ensureDir(workspaceRoot: string): void {
+		const dir = RalphStateManager.getRalphDir(workspaceRoot);
+		if (!fs.existsSync(dir)) {
+			fs.mkdirSync(dir, { recursive: true });
+		}
+	}
+
+	/**
+	 * Write "inprogress" for the given task.
+	 * Creates the .ralph directory if it does not yet exist.
+	 * Overwrites any previous state for this task id.
+	 */
+	static setInProgress(workspaceRoot: string, taskId: number): void {
+		RalphStateManager.ensureDir(workspaceRoot);
+		fs.writeFileSync(
+			RalphStateManager.getTaskStatusPath(workspaceRoot, taskId),
+			'inprogress',
+			{ encoding: 'utf-8', flag: 'w' }
 		);
 	}
 
-	/** Milliseconds since the last observed workspace activity. */
-	getIdleTimeMs(): number {
-		return Date.now() - this.lastActivityTime;
+	/**
+	 * Write "completed" for the given task.
+	 * Safe to call even if the file does not already exist.
+	 */
+	static setCompleted(workspaceRoot: string, taskId: number): void {
+		RalphStateManager.ensureDir(workspaceRoot);
+		fs.writeFileSync(
+			RalphStateManager.getTaskStatusPath(workspaceRoot, taskId),
+			'completed',
+			{ encoding: 'utf-8', flag: 'w' }
+		);
 	}
 
-	/** Reset the clock (call right before sending work to Copilot). */
-	resetActivity(): void {
-		this.lastActivityTime = Date.now();
+	/**
+	 * Read the current task state from disk.
+	 * Returns "inprogress" | "completed" | "none" (file absent or unreadable).
+	 */
+	static getTaskStatus(workspaceRoot: string, taskId: number): 'inprogress' | 'completed' | 'none' {
+		const filePath = RalphStateManager.getTaskStatusPath(workspaceRoot, taskId);
+		try {
+			const content = fs.readFileSync(filePath, 'utf-8').trim();
+			if (content === 'inprogress' || content === 'completed') { return content; }
+		} catch { /* file missing or unreadable */ }
+		return 'none';
 	}
 
-	dispose(): void {
-		this.disposables.forEach(d => d.dispose());
-		this.disposables = [];
+	/**
+	 * Returns the id of the first task whose status file contains "inprogress",
+	 * or null if no task is currently active.
+	 */
+	static getInProgressTaskId(workspaceRoot: string): number | null {
+		const dir = RalphStateManager.getRalphDir(workspaceRoot);
+		if (!fs.existsSync(dir)) { return null; }
+
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(dir);
+		} catch {
+			return null;
+		}
+
+		for (const entry of entries) {
+			const match = entry.match(/^task-(\d+)-status$/);
+			if (!match) { continue; }
+			const taskId = parseInt(match[1], 10);
+			if (RalphStateManager.getTaskStatus(workspaceRoot, taskId) === 'inprogress') {
+				return taskId;
+			}
+		}
+		return null;
+	}
+
+	/** True if any task status file currently contains "inprogress". */
+	static isAnyInProgress(workspaceRoot: string): boolean {
+		return RalphStateManager.getInProgressTaskId(workspaceRoot) !== null;
+	}
+
+	/**
+	 * Reset a stalled inprogress task back to "none" by deleting its file.
+	 * Used during startup recovery when a previous RALPH session crashed.
+	 */
+	static clearStalledTask(workspaceRoot: string, taskId: number): void {
+		const filePath = RalphStateManager.getTaskStatusPath(workspaceRoot, taskId);
+		try {
+			if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); }
+		} catch { /* ignore */ }
+	}
+
+	/**
+	 * Ensure `.ralph/` is present in the workspace's .gitignore.
+	 * Creates .gitignore if it does not exist. Safe to call multiple times.
+	 */
+	static ensureGitignore(workspaceRoot: string): void {
+		const gitignorePath = path.join(workspaceRoot, '.gitignore');
+		const entry = '.ralph/';
+
+		try {
+			let content = '';
+			if (fs.existsSync(gitignorePath)) {
+				content = fs.readFileSync(gitignorePath, 'utf-8');
+			}
+
+			// Check for any variant: .ralph/ .ralph .ralph/* etc.
+			const alreadyIgnored = /^\s*\.ralph[/\\]?\s*$/m.test(content);
+			if (alreadyIgnored) { return; }
+
+			// Append with a leading newline if the file doesn't already end with one
+			const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+			fs.writeFileSync(gitignorePath, `${content}${separator}\n# RALPH Runner task state\n${entry}\n`, 'utf-8');
+			log(`  Added ${entry} to workspace .gitignore`);
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e);
+			log(`  WARNING: Could not update .gitignore: ${msg}`);
+		}
 	}
 }
 
@@ -104,8 +192,6 @@ class ActivityTracker {
 let outputChannel: vscode.OutputChannel;
 let cancelToken: vscode.CancellationTokenSource | null = null;
 let isRunning = false;
-let activityTracker: ActivityTracker | null = null;
-let copilotRequestActive = false;
 let statusBarItem: vscode.StatusBarItem;
 
 // ── Activation ──────────────────────────────────────────────────────────────
@@ -164,6 +250,23 @@ async function startRalph(): Promise<void> {
 		return;
 	}
 
+	// ── Startup: ensure .ralph/ dir exists and is gitignored in the workspace ──
+	RalphStateManager.ensureDir(workspaceRoot);
+	RalphStateManager.ensureGitignore(workspaceRoot);
+	const stalledTaskId = RalphStateManager.getInProgressTaskId(workspaceRoot);
+	if (stalledTaskId !== null) {
+		const action = await vscode.window.showWarningMessage(
+			`RALPH: Task ${stalledTaskId} was left "inprogress" from a previous interrupted run.`,
+			'Clear & Retry', 'Cancel'
+		);
+		if (action !== 'Clear & Retry') {
+			log(`Startup aborted — stalled task ${stalledTaskId} left untouched.`);
+			return;
+		}
+		RalphStateManager.clearStalledTask(workspaceRoot, stalledTaskId);
+		log(`Cleared stalled inprogress state for task ${stalledTaskId}.`);
+	}
+
 	const config = getConfig();
 
 	isRunning = true;
@@ -183,10 +286,6 @@ async function startRalph(): Promise<void> {
 		return;
 	}
 	log(`Loaded ${steps.length} steps from PLAN.md`);
-
-	// Start global activity tracker for the duration of this run
-	activityTracker?.dispose();
-	activityTracker = new ActivityTracker();
 
 	let loopsExecuted = 0;
 
@@ -219,7 +318,7 @@ async function startRalph(): Promise<void> {
 		log(`Step ${stepDef.id}: [${stepDef.action}] ${stepDef.description}`);
 		log(`Phase: ${stepDef.phase}`);
 
-		// ── Requirement 3: Verify step isn't already done ────────────────
+		// Verify step isn't already done (idempotency guard)
 		const alreadyDone = await verifyStepAlreadyDone(stepDef, workspaceRoot);
 		if (alreadyDone) {
 			log(`⏩ Step ${stepDef.id} verified as already complete — skipping execution.`);
@@ -229,25 +328,32 @@ async function startRalph(): Promise<void> {
 			continue;
 		}
 
-		// ── Requirement 2: Wait for Copilot to be idle before queueing ──
-		if (stepDef.action === 'copilot_task' || stepDef.action === 'create_file') {
-			await ensureCopilotIdle();
-		}
+		// Guard: ensure no other task is inprogress before queuing this one.
+		// Under normal sequential operation this resolves immediately; it only
+		// blocks if a stale file somehow slipped through startup recovery.
+		await ensureNoActiveTask(workspaceRoot);
 
-		// Mark in-progress (step is NOT done yet — stays in-progress until confirmed)
+		// ── Persist "inprogress" state to .ralph/task-<id>-status ───────────
+		RalphStateManager.setInProgress(workspaceRoot, stepDef.id);
 		updateStepStatus(statePath, stepDef.id, 'in-progress', '');
+		log(`  Task state written: .ralph/task-${stepDef.id}-status = inprogress`);
 
 		try {
-			// executeStep now waits for Copilot to fully finish before returning
+			// executeStep returns only after Copilot has written "completed"
+			// to .ralph/task-<id>-status (or after a terminal step finishes).
 			await executeStep(stepDef, workspaceRoot);
-			// ── Requirement 1: Only mark done AFTER confirmed completion ──
+
+			// Safety net: ensure the lock is always cleared on success,
+			// even if Copilot neglected to write the file (idempotent for all types).
+			RalphStateManager.setCompleted(workspaceRoot, stepDef.id);
 			updateStepStatus(statePath, stepDef.id, 'done', '');
 			log(`✅ Step ${stepDef.id} completed.`);
 		} catch (err: unknown) {
 			const errMsg = err instanceof Error ? err.message : String(err);
 			log(`❌ Step ${stepDef.id} failed: ${errMsg}`);
+			// Always release the inprogress lock so the loop can advance
+			RalphStateManager.setCompleted(workspaceRoot, stepDef.id);
 			updateStepStatus(statePath, stepDef.id, 'failed', errMsg);
-			// Continue to next step on failure (don't block the whole pipeline)
 		}
 
 		loopsExecuted++;
@@ -266,9 +372,6 @@ async function startRalph(): Promise<void> {
 		);
 	}
 
-	activityTracker?.dispose();
-	activityTracker = null;
-	copilotRequestActive = false;
 	isRunning = false;
 	cancelToken = null;
 	updateStatusBar('idle');
@@ -353,6 +456,10 @@ async function executeTerminal(step: PlanStep, workspaceRoot: string): Promise<v
 			resolve();
 		}, 15_000);
 	});
+
+	// Terminal steps are fully controlled by RALPH — write completed now.
+	RalphStateManager.setCompleted(workspaceRoot, step.id);
+	log(`  Task state written: .ralph/task-${step.id}-status = completed`);
 }
 
 async function executeCreateFile(step: PlanStep, workspaceRoot: string): Promise<void> {
@@ -363,13 +470,13 @@ async function executeCreateFile(step: PlanStep, workspaceRoot: string): Promise
 	// Delegate to Copilot to generate the file content based on the description
 	const prompt = buildCopilotPrompt(step, workspaceRoot);
 	log(`  Delegating file creation to Copilot: ${step.path}`);
-	await sendToCopilot(prompt);
+	await sendToCopilot(prompt, step.id, workspaceRoot);
 }
 
 async function executeCopilotTask(step: PlanStep, workspaceRoot: string): Promise<void> {
 	const prompt = buildCopilotPrompt(step, workspaceRoot);
 	log('  Delegating task to Copilot...');
-	await sendToCopilot(prompt);
+	await sendToCopilot(prompt, step.id, workspaceRoot);
 }
 
 // ── Copilot Integration ─────────────────────────────────────────────────────
@@ -422,27 +529,31 @@ function buildCopilotPrompt(step: PlanStep, workspaceRoot: string): string {
 			break;
 	}
 
+	// ── Completion signal ───────────────────────────────────────────────────
+	// RALPH polls this file to know when Copilot has finished the task.
+	// Copilot MUST write this file as the very last action of its response.
+	stateSnippet.push(
+		'',
+		'━━━ TASK COMPLETION SIGNAL (REQUIRED) ━━━',
+		`When you have fully completed ALL work for this task, write the exact text \`completed\``,
+		`(nothing else, no newline) to the file: ${path.join(workspaceRoot, RALPH_DIR, `task-${step.id}-status`).replace(/\\/g, '/')}`,
+		'This is how RALPH knows the task is done and can move to the next step.',
+		'Do NOT skip this step — without it RALPH will time out waiting.',
+	);
+
 	return stateSnippet.join('\n');
 }
 
-async function sendToCopilot(prompt: string): Promise<void> {
-	// Requirement 2: wait for Copilot to be fully idle before sending anything
-	await ensureCopilotIdle();
-
-	// Reset activity baseline right before sending the prompt
-	activityTracker?.resetActivity();
-	copilotRequestActive = true;
-
+async function sendToCopilot(prompt: string, taskId: number, workspaceRoot: string): Promise<void> {
 	log('  Sending prompt to Copilot Chat...');
 
-	// Use the VS Code chat API to send a message to Copilot
 	try {
 		await vscode.commands.executeCommand('workbench.action.chat.open', {
 			query: prompt,
 			isPartialQuery: false
 		});
 	} catch {
-		// Fallback: try the older command ID
+		// Fallback: try older command API
 		try {
 			await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
 			await sleep(1000);
@@ -455,66 +566,66 @@ async function sendToCopilot(prompt: string): Promise<void> {
 		}
 	}
 
-	// Requirement 1: wait for Copilot to FULLY finish before returning
-	await waitForCopilotCompletion();
-	copilotRequestActive = false;
+	// Poll the .ralph status file until Copilot writes "completed" to it
+	await waitForCopilotCompletion(taskId, workspaceRoot);
 }
 
 /**
- * Activity-based wait: watches workspace events (file edits, file creation,
- * terminal opens, etc.) and considers Copilot done only after a sustained
- * idle period with no workspace changes.
+ * Polls .ralph/task-<id>-status until Copilot writes "completed" to it.
+ * Enforces a minimum wait (copilotMinWaitMs) before checking so that Copilot
+ * has time to begin working before the first read.
+ * Throws if the timeout is exceeded without seeing "completed".
  */
-async function waitForCopilotCompletion(): Promise<void> {
+async function waitForCopilotCompletion(taskId: number, workspaceRoot: string): Promise<void> {
 	const config = getConfig();
-	log('  Waiting for Copilot to finish processing...');
+	log(`  Waiting for Copilot to write "completed" to .ralph/task-${taskId}-status...`);
 
 	const startTime = Date.now();
 
 	while (Date.now() - startTime < config.COPILOT_TIMEOUT_MS) {
 		if (cancelToken?.token.isCancellationRequested) {
-			copilotRequestActive = false;
 			throw new Error('Cancelled by user');
 		}
 
 		await sleep(config.COPILOT_RESPONSE_POLL_MS);
 		const elapsed = Date.now() - startTime;
 
-		// Enforce a minimum wait so Copilot has time to begin working
+		// Enforce a minimum wait before the first status check
 		if (elapsed < config.COPILOT_MIN_WAIT_MS) {
-			log(`  … still within minimum wait (${Math.round(elapsed / 1000)}s / ${config.COPILOT_MIN_WAIT_MS / 1000}s)`);
+			log(`  … minimum wait in progress (${Math.round(elapsed / 1000)}s / ${Math.round(config.COPILOT_MIN_WAIT_MS / 1000)}s)`);
 			continue;
 		}
 
-		// After the minimum wait, require a sustained idle period
-		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
-			log(`  Copilot appears done — no workspace activity for ${Math.round(idleMs / 1000)}s (elapsed ${Math.round(elapsed / 1000)}s)`);
+		const status = RalphStateManager.getTaskStatus(workspaceRoot, taskId);
+		if (status === 'completed') {
+			log(`  ✓ Copilot wrote "completed" to .ralph/task-${taskId}-status (elapsed ${Math.round(elapsed / 1000)}s)`);
 			return;
 		}
 
-		log(`  … Copilot still active (idle ${Math.round(idleMs / 1000)}s < threshold ${config.COPILOT_IDLE_THRESHOLD_MS / 1000}s, elapsed ${Math.round(elapsed / 1000)}s)`);
+		log(`  … still waiting for Copilot to complete task ${taskId} (status: ${status}, elapsed ${Math.round(elapsed / 1000)}s)`);
 	}
 
-	log(`  Copilot timed out after ${config.COPILOT_TIMEOUT_MS / 1000}s — proceeding.`);
+	log(`  ⚠ Copilot timed out after ${Math.round(config.COPILOT_TIMEOUT_MS / 1000)}s without writing "completed" — proceeding.`);
+	throw new Error(`Copilot timed out on task ${taskId}`);
 }
 
 /**
- * Requirement 2: Block until Copilot is not busy. Polls every 5 s.
- * Checks both our own copilotRequestActive flag and workspace activity.
+ * Block until no .ralph/task-*-status file contains "inprogress".
+ * Under normal sequential operation this resolves immediately.
+ * It only waits if a stale lock file was not cleared during startup recovery
+ * (e.g. the directory was manually created or a concurrent process wrote it).
+ * Polls every COPILOT_RESPONSE_POLL_MS and times out after COPILOT_TIMEOUT_MS.
  */
-async function ensureCopilotIdle(): Promise<void> {
+async function ensureNoActiveTask(workspaceRoot: string): Promise<void> {
 	const config = getConfig();
-	if (!copilotRequestActive) {
-		// Quick path: we don't think Copilot is busy
-		// Still do a brief activity check in case something is happening
-		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
-			return; // Copilot is idle
-		}
+
+	if (!RalphStateManager.isAnyInProgress(workspaceRoot)) {
+		return; // Fast path — no active task
 	}
 
-	log('  ⏳ Copilot appears busy — waiting for it to become idle (polling every 5s)...');
+	const activeId = RalphStateManager.getInProgressTaskId(workspaceRoot);
+	log(`  ⏳ Task ${activeId} is still inprogress on disk — waiting for it to complete...`);
+
 	const waitStart = Date.now();
 
 	while (Date.now() - waitStart < config.COPILOT_TIMEOUT_MS) {
@@ -524,18 +635,22 @@ async function ensureCopilotIdle(): Promise<void> {
 
 		await sleep(config.COPILOT_RESPONSE_POLL_MS);
 
-		const idleMs = activityTracker?.getIdleTimeMs() ?? Infinity;
-		if (!copilotRequestActive && idleMs >= config.COPILOT_IDLE_THRESHOLD_MS) {
+		if (!RalphStateManager.isAnyInProgress(workspaceRoot)) {
 			const waited = Math.round((Date.now() - waitStart) / 1000);
-			log(`  ✓ Copilot is now idle (waited ${waited}s)`);
+			log(`  ✓ No active task on disk — proceeding (waited ${waited}s)`);
 			return;
 		}
 
-		log(`  … still waiting for Copilot (idle ${Math.round(idleMs / 1000)}s, requestActive=${copilotRequestActive})`);
+		const stillActive = RalphStateManager.getInProgressTaskId(workspaceRoot);
+		log(`  … still waiting for task ${stillActive} to clear inprogress state`);
 	}
 
-	log('  WARNING: Timed out waiting for Copilot to become idle — proceeding anyway.');
-	copilotRequestActive = false; // Reset to avoid deadlock
+	// Timed out — clear the lock to prevent a permanent deadlock
+	const timedOutId = RalphStateManager.getInProgressTaskId(workspaceRoot);
+	if (timedOutId !== null) {
+		log(`  WARNING: Timed out waiting for task ${timedOutId} — clearing stale lock and proceeding.`);
+		RalphStateManager.clearStalledTask(workspaceRoot, timedOutId);
+	}
 }
 
 // ── Step Verification ───────────────────────────────────────────────────────
