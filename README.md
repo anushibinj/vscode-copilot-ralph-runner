@@ -8,23 +8,26 @@ Use it for migrations, bug fixes, feature implementation, refactoring, test crea
 
 ## Features
 
-- **Autonomous looping** — Executes up to 2 steps per run (configurable), then pauses so you can review before continuing.
+- **Autonomous looping** — Executes up to a configurable number of steps per run (default: 2), then pauses for review before continuing.
 - **Three action types:**
-  - `copilot_task` — Sends a detailed prompt to Copilot Chat and waits for it to finish making changes.
-  - `run_terminal` — Opens a terminal, runs a shell command, and waits for completion.
-  - `create_file` — Delegates file creation to Copilot with contextual instructions.
+    - `copilot_task` — Sends a detailed prompt to Copilot Chat and waits for it to finish making changes.
+    - `run_terminal` — Opens a terminal, runs a shell command, and waits for completion.
+    - `create_file` — Delegates file creation to Copilot with contextual instructions.
 - **Activity-based completion detection** — Monitors workspace events (file edits, file creation, terminal activity) to determine when Copilot has finished processing a step.
 - **Persistent status tracking** — All progress is written to `STATUS.md` so you can stop, restart VS Code, or resume at any time.
 - **Smart skip detection** — Before executing a step, RALPH checks whether the outcome already exists (e.g., file already created, directory already exists, `node_modules` already installed) and skips it automatically.
 - **Fully resumable** — If a step is left `in-progress`, RALPH picks it up on the next start. Failed steps are logged and skipped so the pipeline continues.
+- **Quick Start workflow** — Easily generate or import `PLAN.md` and `STATUS.md` using the built-in Quick Start, including Copilot-powered plan generation from a user goal.
+- **Status bar integration** — Shows RALPH's current state and provides quick access to commands.
+- **Comprehensive status and reset commands** — View progress, reset steps, and manage the plan directly from the command palette or status bar menu.
 
 ## Requirements
 
 - **VS Code** 1.109.0 or later
 - **GitHub Copilot Chat** extension installed and signed in — RALPH delegates code tasks to Copilot via the chat API.
 - Two markdown files in your workspace root:
-  - **`PLAN.md`** — Contains a fenced ` ```json ` block with a `{ "steps": [...] }` array defining each step.
-  - **`STATUS.md`** — A markdown table tracking the status of each step (`pending`, `in-progress`, `done`, `failed`, `skipped`) along with timestamps and notes. Also includes a quick-status summary section that RALPH updates automatically.
+    - **`PLAN.md`** — Contains a fenced ` ```json ` block with a `{ "steps": [...] }` array defining each step.
+    - **`STATUS.md`** — A markdown table tracking the status of each step (`pending`, `in-progress`, `done`, `failed`, `skipped`) along with timestamps and notes. Also includes a quick-status summary section that RALPH updates automatically.
 
 ### PLAN.md format
 
@@ -32,41 +35,41 @@ The plan file must contain a fenced JSON block with a `steps` array. Each step h
 
 ```json
 {
-  "steps": [
-    {
-      "id": 1,
-      "phase": "Setup",
-      "action": "run_terminal",
-      "command": "mkdir -p src/main/java",
-      "description": "Create project directory structure"
-    },
-    {
-      "id": 2,
-      "phase": "Configuration",
-      "action": "create_file",
-      "path": "src/main/resources/application.properties",
-      "description": "Create Spring Boot application properties"
-    },
-    {
-      "id": 3,
-      "phase": "Implementation",
-      "action": "copilot_task",
-      "instruction": "Add unit tests for all service classes in src/services/...",
-      "description": "Create unit tests for services"
-    }
-  ]
+	"steps": [
+		{
+			"id": 1,
+			"phase": "Setup",
+			"action": "run_terminal",
+			"command": "mkdir -p src/main/java",
+			"description": "Create project directory structure"
+		},
+		{
+			"id": 2,
+			"phase": "Configuration",
+			"action": "create_file",
+			"path": "src/main/resources/application.properties",
+			"description": "Create Spring Boot application properties"
+		},
+		{
+			"id": 3,
+			"phase": "Implementation",
+			"action": "copilot_task",
+			"instruction": "Add unit tests for all service classes in src/services/...",
+			"description": "Create unit tests for services"
+		}
+	]
 }
 ```
 
-| Field         | Required | Description                                                  |
-| ------------- | -------- | ------------------------------------------------------------ |
-| `id`          | Yes      | Unique numeric step identifier                               |
-| `phase`       | Yes      | Logical grouping label (e.g., "Setup", "Implementation")     |
-| `action`      | Yes      | One of `run_terminal`, `create_file`, or `copilot_task`      |
-| `description` | Yes      | Human-readable summary of what the step does                 |
-| `command`     | If `run_terminal` | Shell command to execute                            |
-| `path`        | If `create_file`  | Workspace-relative path of the file to create       |
-| `instruction` | If `copilot_task` | Detailed instructions for Copilot to follow         |
+| Field         | Required          | Description                                              |
+| ------------- | ----------------- | -------------------------------------------------------- |
+| `id`          | Yes               | Unique numeric step identifier                           |
+| `phase`       | Yes               | Logical grouping label (e.g., "Setup", "Implementation") |
+| `action`      | Yes               | One of `run_terminal`, `create_file`, or `copilot_task`  |
+| `description` | Yes               | Human-readable summary of what the step does             |
+| `command`     | If `run_terminal` | Shell command to execute                                 |
+| `path`        | If `create_file`  | Workspace-relative path of the file to create            |
+| `instruction` | If `copilot_task` | Detailed instructions for Copilot to follow              |
 
 ### STATUS.md format
 
@@ -81,20 +84,21 @@ It also looks for a quick-status summary section with lines like `| Total Steps 
 ## Usage
 
 1. Create `PLAN.md` and `STATUS.md` in your workspace root (see formats above), or use **RALPH: Quick Start** to generate them.
-2. Open the Command Palette (`Ctrl+Shift+P`) and run one of the RALPH commands.
+2. Open the Command Palette (`Ctrl+Shift+P`) or use the status bar menu to run RALPH commands.
 3. RALPH will begin processing pending steps, logging progress to the **RALPH Runner** output channel.
-4. After the configured number of steps (default: 2), RALPH pauses — review the changes, then run **RALPH: Start** again to continue.
+4. After the configured number of steps, RALPH pauses — review the changes, then run **RALPH: Start** again to continue.
 
 ## Commands
 
-| Command                    | Description                                                                 |
-| -------------------------- | --------------------------------------------------------------------------- |
-| `RALPH: Start`             | Begin (or resume) the autonomous loop from the next pending step.           |
-| `RALPH: Stop`              | Cancel the current run immediately.                                         |
-| `RALPH: Show Status`       | Display a summary of step progress in the output channel and as a notification. |
-| `RALPH: Reset Step`        | Pick a completed, failed, or in-progress step and reset it back to `pending`. |
-| `RALPH: Quick Start`       | Set up plan & status files — provide existing ones or generate via Copilot. |
-| `RALPH: Open Settings`     | Configure RALPH Runner options.                                             |
+| Command                | Description                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| `RALPH: Start`         | Begin (or resume) the autonomous loop from the next pending step.               |
+| `RALPH: Stop`          | Cancel the current run immediately.                                             |
+| `RALPH: Show Status`   | Display a summary of step progress in the output channel and as a notification. |
+| `RALPH: Reset Step`    | Pick a completed, failed, or in-progress step and reset it back to `pending`.   |
+| `RALPH: Quick Start`   | Set up plan & status files — provide existing ones or generate via Copilot.     |
+| `RALPH: Open Settings` | Configure RALPH Runner options.                                                 |
+| Status Bar Menu        | Access all commands and see current state from the VS Code status bar.          |
 
 ## How it works
 
@@ -102,7 +106,7 @@ It also looks for a quick-status summary section with lines like `| Total Steps 
 2. **Find next step** — It looks for the first `in-progress` step (to resume) or the first `pending` step.
 3. **Verify** — Before executing, it checks whether the step's outcome already exists in the workspace (smart skip).
 4. **Execute** — Depending on the action type, RALPH either runs a terminal command, or sends a prompt to Copilot Chat and waits.
-5. **Wait for completion** — For Copilot tasks, RALPH monitors workspace activity (file edits, saves, terminal events). Once no activity is detected for 30 seconds (after a minimum 15-second wait), it considers the step complete.
+5. **Wait for completion** — For Copilot tasks, RALPH monitors workspace activity (file edits, saves, terminal events). Once no activity is detected for a configurable idle period (default: 30 seconds, after a minimum 15-second wait), it considers the step complete.
 6. **Update status** — The step is marked `done` or `failed` in `STATUS.md`, and the quick-status summary is refreshed.
 7. **Loop** — Repeat from step 2 until the loop limit is reached or all steps are done.
 
@@ -115,4 +119,4 @@ It also looks for a quick-status summary section with lines like `| Total Steps 
 
 ### 0.0.1
 
-- Initial release with autonomous loop, Copilot Chat integration, activity-based completion detection, persistent status tracking, and smart skip verification.
+- Initial release with autonomous loop, Copilot Chat integration, activity-based completion detection, persistent status tracking, smart skip verification, Quick Start workflow, and status bar integration.
