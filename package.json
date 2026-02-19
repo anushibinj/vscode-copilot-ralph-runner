@@ -65,9 +65,9 @@
         },
         "ralph-runner.copilotTimeoutMs": {
           "type": "number",
-          "default": 600000,
+          "default": 3600000,
           "minimum": 30000,
-          "description": "Maximum time (ms) to wait for Copilot per step (default 10 min)."
+          "description": "Maximum time (ms) to wait for Copilot per step (default 1 hour)."
         },
         "ralph-runner.copilotMinWaitMs": {
           "type": "number",
