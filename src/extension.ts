@@ -820,7 +820,7 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 
 async function showCommandMenu(): Promise<void> {
 	const items: vscode.QuickPickItem[] = [
-		{ label: '$(zap)  Quick Start', description: 'Set up plan & status files (or generate them via Copilot)' },
+		{ label: '$(zap)  Generate plan', description: 'Initialize plan & status files (or generate them via Copilot)' },
 		{ label: '$(play)  Start', description: 'Begin or resume the autonomous task loop' },
 		{ label: '$(debug-stop)  Stop', description: 'Cancel the current run' },
 		{ label: '$(info)  Show Status', description: 'Display step progress summary' },
@@ -835,7 +835,7 @@ async function showCommandMenu(): Promise<void> {
 	if (!selected) { return; }
 
 	const commandMap: Record<string, string> = {
-		'$(zap)  Quick Start': 'ralph-runner.quickStart',
+		'$(zap)  Generate plan': 'ralph-runner.quickStart',
 		'$(play)  Start': 'ralph-runner.start',
 		'$(debug-stop)  Stop': 'ralph-runner.stop',
 		'$(info)  Show Status': 'ralph-runner.status',
@@ -865,7 +865,7 @@ async function quickStart(): Promise<void> {
 
 	outputChannel.show(true);
 	log('═══════════════════════════════════════════════════');
-	log('RALPH Quick Start');
+	log('RALPH Generate Plan');
 	log('═══════════════════════════════════════════════════');
 
 	const planPath = path.join(workspaceRoot, 'PLAN.md');
@@ -942,7 +942,7 @@ async function quickStartProvideFiles(
 			openLabel: 'Select PLAN.md'
 		});
 		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no PLAN.md selected.');
+			vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no PLAN.md selected.');
 			return;
 		}
 		const srcPath = uris[0].fsPath;
@@ -959,7 +959,7 @@ async function quickStartProvideFiles(
 			openLabel: 'Select STATUS.md'
 		});
 		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Quick Start cancelled — no STATUS.md selected.');
+			vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no STATUS.md selected.');
 			return;
 		}
 		const srcPath = uris[0].fsPath;
@@ -968,7 +968,7 @@ async function quickStartProvideFiles(
 	}
 
 	vscode.window.showInformationMessage('RALPH: Plan and status files are ready! You can now run "RALPH: Start".');
-	log('Quick Start complete — files placed in workspace root.');
+	log('Generate Plan complete — files placed in workspace root.');
 }
 
 /**
@@ -980,14 +980,14 @@ async function quickStartGenerate(
 	planPath: string, statePath: string, workspaceRoot: string
 ): Promise<void> {
 	const userGoal = await vscode.window.showInputBox({
-		title: 'RALPH Quick Start — Describe your goal',
+		title: 'RALPH Generate Plan — Describe your goal',
 		prompt: 'What are you trying to accomplish? (e.g. "Fix all TypeScript errors", "Add unit tests for all services", "Migrate from jQuery to React")',
 		placeHolder: 'Describe what you want to accomplish…',
 		ignoreFocusOut: true
 	});
 
 	if (!userGoal || userGoal.trim().length === 0) {
-		vscode.window.showWarningMessage('RALPH Quick Start cancelled — no goal provided.');
+		vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no goal provided.');
 		return;
 	}
 
@@ -1017,7 +1017,7 @@ async function quickStartGenerate(
 	vscode.window.showInformationMessage(
 		'RALPH: Copilot is generating your plan files. Once they appear in the workspace root, run "RALPH: Start".'
 	);
-	log('Quick Start prompt sent to Copilot. Waiting for file generation…');
+	log('Generate Plan prompt sent to Copilot. Waiting for file generation…');
 }
 
 /**
