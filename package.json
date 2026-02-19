@@ -3,6 +3,7 @@
   "displayName": "ralph-runner",
   "description": "Autonomous task runner — reads PLAN.md, tracks progress in STATUS.md, and drives Copilot Chat to execute each step in an automated loop",
   "version": "0.0.1",
+  "publisher": "recent-graduates",
   "repository": {
     "type": "git",
     "url": "https://github.com/anushibinj/vscode-copilot-ralph-runner.git"
