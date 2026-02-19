@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# RALPH Runner task state
+.ralph/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

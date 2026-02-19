@@ -69,17 +69,11 @@
           "minimum": 30000,
           "description": "Maximum time (ms) to wait for Copilot per step (default 10 min)."
         },
-        "ralph-runner.copilotIdleThresholdMs": {
-          "type": "number",
-          "default": 30000,
-          "minimum": 5000,
-          "description": "Duration of no workspace activity (ms) before assuming Copilot is done."
-        },
         "ralph-runner.copilotMinWaitMs": {
           "type": "number",
           "default": 15000,
           "minimum": 0,
-          "description": "Minimum time (ms) to wait for Copilot to start working before checking idle."
+          "description": "Minimum time (ms) to wait for Copilot to start working before checking the step is complete."
         }
       }
     }
