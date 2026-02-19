@@ -305,9 +305,16 @@ async function executeStep(step: PlanStep, workspaceRoot: string): Promise<void>
 }
 
 async function executeTerminal(step: PlanStep, workspaceRoot: string): Promise<void> {
-	const command = step.command;
+	let command = step.command;
 	if (!command) {
 		throw new Error('run_terminal step has no command');
+	}
+
+	// Detect the default shell and adjust command chaining for PowerShell
+	const shell = vscode.workspace.getConfiguration('terminal').get<string>('integrated.defaultProfile.windows');
+	if (shell && shell.toLowerCase().includes('powershell')) {
+		// Replace '&&' with ';' for PowerShell compatibility
+		command = command.replace(/&&/g, ';');
 	}
 
 	log(`  Running: ${command}`);
