@@ -1,7 +1,7 @@
 {
   "name": "ralph-runner",
   "displayName": "ralph-runner",
-  "description": "Autonomous task runner — reads PLAN.md, tracks progress in STATUS.md, and drives Copilot Chat to execute each step in an automated loop",
+  "description": "Autonomous task runner — reads prd.json user stories, tracks progress inline, and drives Copilot Chat to execute each story in an automated loop",
   "version": "0.0.1",
   "publisher": "recent-graduates",
   "repository": {
@@ -32,7 +32,7 @@
       },
       {
         "command": "ralph-runner.resetStep",
-        "title": "RALPH: Reset Step"
+        "title": "RALPH: Reset Story"
       },
       {
         "command": "ralph-runner.openSettings",
@@ -44,7 +44,7 @@
       },
       {
         "command": "ralph-runner.quickStart",
-        "title": "RALPH: Quick Start"
+        "title": "RALPH: Generate PRD"
       }
     ],
     "configuration": {

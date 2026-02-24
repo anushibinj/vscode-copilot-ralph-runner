@@ -5,9 +5,9 @@ import * as path from 'path';
 // ────────────────────────────────────────────────────────────────────────────
 // RALPH Runner — Autonomous Task Runner for VS Code
 //
-// Reads PLAN.md for step definitions and STATUS.md for persistent progress
-// tracking. Loops autonomously (up to MAX_AUTONOMOUS_LOOPS) injecting
-// Copilot chat tasks for each step. Fully resumable.
+// Reads prd.json for user story definitions and tracks progress inline.
+// Loops autonomously (up to MAX_AUTONOMOUS_LOOPS) injecting Copilot chat
+// tasks for each user story. Fully resumable.
 //
 // Task execution state is persisted in the .ralph directory:
 //   .ralph/task-<id>-status  →  "inprogress" | "completed"
@@ -29,23 +29,19 @@ function getConfig() {
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-interface PlanStep {
-	id: number;
-	phase: string;
-	action: string; // "run_terminal" | "create_file" | "copilot_task"
-	command?: string;
-	path?: string;
-	instruction?: string;
+interface PrdFile {
+	project: string;
+	branchName: string;
 	description: string;
+	userStories: UserStory[];
 }
 
-type StepStatus = 'pending' | 'in-progress' | 'done' | 'failed' | 'skipped';
-
-interface TrackedStep {
-	id: number;
-	status: StepStatus;
-	timestamp: string;
-	notes: string;
+interface UserStory {
+	id: string;           // e.g. "US-001"
+	title: string;
+	description: string;
+	acceptanceCriteria: string[];
+	priority: number;
 }
 
 // ── Filesystem Task State Manager ────────────────────────────────────────────
@@ -53,6 +49,8 @@ interface TrackedStep {
 // execution lock.  File content is either "inprogress" or "completed".
 
 const RALPH_DIR = '.ralph';
+const PRD_FILENAME = 'prd.json';
+const PROGRESS_FILENAME = 'progress.txt';
 
 class RalphStateManager {
 
@@ -62,7 +60,7 @@ class RalphStateManager {
 	}
 
 	/** Absolute path to the status file for a given task id. */
-	static getTaskStatusPath(workspaceRoot: string, taskId: number): string {
+	static getTaskStatusPath(workspaceRoot: string, taskId: string): string {
 		return path.join(RalphStateManager.getRalphDir(workspaceRoot), `task-${taskId}-status`);
 	}
 
@@ -81,7 +79,7 @@ class RalphStateManager {
 	 * Creates the .ralph directory if it does not yet exist.
 	 * Overwrites any previous state for this task id.
 	 */
-	static setInProgress(workspaceRoot: string, taskId: number): void {
+	static setInProgress(workspaceRoot: string, taskId: string): void {
 		RalphStateManager.ensureDir(workspaceRoot);
 		fs.writeFileSync(
 			RalphStateManager.getTaskStatusPath(workspaceRoot, taskId),
@@ -94,7 +92,7 @@ class RalphStateManager {
 	 * Write "completed" for the given task.
 	 * Safe to call even if the file does not already exist.
 	 */
-	static setCompleted(workspaceRoot: string, taskId: number): void {
+	static setCompleted(workspaceRoot: string, taskId: string): void {
 		RalphStateManager.ensureDir(workspaceRoot);
 		fs.writeFileSync(
 			RalphStateManager.getTaskStatusPath(workspaceRoot, taskId),
@@ -107,7 +105,7 @@ class RalphStateManager {
 	 * Read the current task state from disk.
 	 * Returns "inprogress" | "completed" | "none" (file absent or unreadable).
 	 */
-	static getTaskStatus(workspaceRoot: string, taskId: number): 'inprogress' | 'completed' | 'none' {
+	static getTaskStatus(workspaceRoot: string, taskId: string): 'inprogress' | 'completed' | 'none' {
 		const filePath = RalphStateManager.getTaskStatusPath(workspaceRoot, taskId);
 		try {
 			const content = fs.readFileSync(filePath, 'utf-8').trim();
@@ -120,7 +118,7 @@ class RalphStateManager {
 	 * Returns the id of the first task whose status file contains "inprogress",
 	 * or null if no task is currently active.
 	 */
-	static getInProgressTaskId(workspaceRoot: string): number | null {
+	static getInProgressTaskId(workspaceRoot: string): string | null {
 		const dir = RalphStateManager.getRalphDir(workspaceRoot);
 		if (!fs.existsSync(dir)) { return null; }
 
@@ -132,9 +130,9 @@ class RalphStateManager {
 		}
 
 		for (const entry of entries) {
-			const match = entry.match(/^task-(\d+)-status$/);
+			const match = entry.match(/^task-(.+)-status$/);
 			if (!match) { continue; }
-			const taskId = parseInt(match[1], 10);
+			const taskId = match[1];
 			if (RalphStateManager.getTaskStatus(workspaceRoot, taskId) === 'inprogress') {
 				return taskId;
 			}
@@ -151,7 +149,7 @@ class RalphStateManager {
 	 * Reset a stalled inprogress task back to "none" by deleting its file.
 	 * Used during startup recovery when a previous RALPH session crashed.
 	 */
-	static clearStalledTask(workspaceRoot: string, taskId: number): void {
+	static clearStalledTask(workspaceRoot: string, taskId: string): void {
 		const filePath = RalphStateManager.getTaskStatusPath(workspaceRoot, taskId);
 		try {
 			if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); }
@@ -164,7 +162,7 @@ class RalphStateManager {
 	 */
 	static ensureGitignore(workspaceRoot: string): void {
 		const gitignorePath = path.join(workspaceRoot, '.gitignore');
-		const entry = '.ralph/';
+		const entriesToIgnore = ['.ralph/'];
 
 		try {
 			let content = '';
@@ -172,19 +170,146 @@ class RalphStateManager {
 				content = fs.readFileSync(gitignorePath, 'utf-8');
 			}
 
-			// Check for any variant: .ralph/ .ralph .ralph/* etc.
-			const alreadyIgnored = /^\s*\.ralph[/\\]?\s*$/m.test(content);
-			if (alreadyIgnored) { return; }
+			const missing: string[] = [];
+			for (const entry of entriesToIgnore) {
+				// Build a regex that matches the entry (with optional trailing slash/backslash)
+				const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const pattern = new RegExp(`^\\s*${escaped}\\s*$`, 'm');
+				if (!pattern.test(content)) {
+					missing.push(entry);
+				}
+			}
+
+			if (missing.length === 0) { return; }
 
 			// Append with a leading newline if the file doesn't already end with one
 			const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-			fs.writeFileSync(gitignorePath, `${content}${separator}\n# RALPH Runner task state\n${entry}\n`, 'utf-8');
-			log(`  Added ${entry} to workspace .gitignore`);
+			const block = missing.join('\n');
+			fs.writeFileSync(gitignorePath, `${content}${separator}\n# RALPH Runner task state\n${block}\n`, 'utf-8');
+			log(`  Added to .gitignore: ${missing.join(', ')}`);
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
 			log(`  WARNING: Could not update .gitignore: ${msg}`);
 		}
 	}
+}
+
+// ── PRD File Operations ─────────────────────────────────────────────────────
+
+function getPrdPath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, PRD_FILENAME);
+}
+
+function parsePrd(workspaceRoot: string): PrdFile | null {
+	const prdPath = getPrdPath(workspaceRoot);
+	try {
+		const content = fs.readFileSync(prdPath, 'utf-8');
+		return JSON.parse(content) as PrdFile;
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
+		log(`ERROR: Failed to read/parse prd.json: ${msg}`);
+		return null;
+	}
+}
+
+// ── Progress File Operations ─────────────────────────────────────────────────
+// progress.txt tracks which user stories have been completed or failed.
+// Each line is: <storyId> | <status> | <timestamp> | <notes>
+// e.g.: US-001 | done | 2026-02-24 12:00:00 | Completed successfully
+
+interface ProgressEntry {
+	id: string;
+	status: 'done' | 'failed';
+	timestamp: string;
+	notes: string;
+}
+
+function getProgressPath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, PROGRESS_FILENAME);
+}
+
+function readProgress(workspaceRoot: string): ProgressEntry[] {
+	const progressPath = getProgressPath(workspaceRoot);
+	if (!fs.existsSync(progressPath)) { return []; }
+
+	try {
+		const content = fs.readFileSync(progressPath, 'utf-8');
+		const entries: ProgressEntry[] = [];
+
+		for (const line of content.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) { continue; }
+
+			const parts = trimmed.split('|').map(p => p.trim());
+			if (parts.length >= 2) {
+				entries.push({
+					id: parts[0],
+					status: parts[1] as 'done' | 'failed',
+					timestamp: parts[2] || '',
+					notes: parts[3] || '',
+				});
+			}
+		}
+
+		return entries;
+	} catch {
+		return [];
+	}
+}
+
+function writeProgressEntry(workspaceRoot: string, id: string, status: 'done' | 'failed', notes: string): void {
+	const progressPath = getProgressPath(workspaceRoot);
+	const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+	const line = `${id} | ${status} | ${timestamp} | ${notes}`;
+
+	let content = '';
+	if (fs.existsSync(progressPath)) {
+		content = fs.readFileSync(progressPath, 'utf-8');
+
+		// Remove any existing entry for this id so we don't duplicate
+		const lines = content.split('\n').filter(l => {
+			const trimmed = l.trim();
+			if (!trimmed || trimmed.startsWith('#')) { return true; }
+			const entryId = trimmed.split('|')[0].trim();
+			return entryId !== id;
+		});
+		content = lines.join('\n');
+	} else {
+		content = '# RALPH Runner Progress\n# Format: <storyId> | <status> | <timestamp> | <notes>\n';
+	}
+
+	if (!content.endsWith('\n')) { content += '\n'; }
+	content += line + '\n';
+
+	fs.writeFileSync(progressPath, content, 'utf-8');
+}
+
+function removeProgressEntry(workspaceRoot: string, id: string): void {
+	const progressPath = getProgressPath(workspaceRoot);
+	if (!fs.existsSync(progressPath)) { return; }
+
+	const content = fs.readFileSync(progressPath, 'utf-8');
+	const lines = content.split('\n').filter(l => {
+		const trimmed = l.trim();
+		if (!trimmed || trimmed.startsWith('#')) { return true; }
+		const entryId = trimmed.split('|')[0].trim();
+		return entryId !== id;
+	});
+	fs.writeFileSync(progressPath, lines.join('\n') + '\n', 'utf-8');
+}
+
+function getStoryProgress(workspaceRoot: string, storyId: string): ProgressEntry | undefined {
+	const entries = readProgress(workspaceRoot);
+	return entries.find(e => e.id === storyId);
+}
+
+function findNextPendingStory(prd: PrdFile, workspaceRoot: string): UserStory | null {
+	const progress = readProgress(workspaceRoot);
+	const doneIds = new Set(progress.filter(e => e.status === 'done').map(e => e.id));
+
+	// Sort by priority (ascending — lower number = higher priority)
+	const sorted = [...prd.userStories].sort((a, b) => a.priority - b.priority);
+	return sorted.find(s => !doneIds.has(s.id)) || null;
 }
 
 // ── Globals ─────────────────────────────────────────────────────────────────
@@ -211,7 +336,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ralph-runner.start', () => startRalph()),
 		vscode.commands.registerCommand('ralph-runner.stop', () => stopRalph()),
 		vscode.commands.registerCommand('ralph-runner.status', () => showStatus()),
-		vscode.commands.registerCommand('ralph-runner.resetStep', () => resetStep()),
+		vscode.commands.registerCommand('ralph-runner.resetStep', () => resetStory()),
 		vscode.commands.registerCommand('ralph-runner.openSettings', () => {
 			vscode.commands.executeCommand('workbench.action.openSettings', 'ralph-runner');
 		}),
@@ -242,17 +367,16 @@ async function startRalph(): Promise<void> {
 		return;
 	}
 
-	const planPath = path.join(workspaceRoot, 'PLAN.md');
-	const statePath = path.join(workspaceRoot, 'STATUS.md');
-
-	if (!fs.existsSync(planPath) || !fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('PLAN.md or STATUS.md not found in workspace root.');
+	const prdPath = getPrdPath(workspaceRoot);
+	if (!fs.existsSync(prdPath)) {
+		vscode.window.showErrorMessage('prd.json not found in workspace root.');
 		return;
 	}
 
 	// ── Startup: ensure .ralph/ dir exists and is gitignored in the workspace ──
 	RalphStateManager.ensureDir(workspaceRoot);
 	RalphStateManager.ensureGitignore(workspaceRoot);
+
 	const stalledTaskId = RalphStateManager.getInProgressTaskId(workspaceRoot);
 	if (stalledTaskId !== null) {
 		const action = await vscode.window.showWarningMessage(
@@ -279,14 +403,6 @@ async function startRalph(): Promise<void> {
 
 	updateStatusBar('running');
 
-	const steps = parsePlan(planPath);
-	if (steps.length === 0) {
-		log('ERROR: Could not parse any steps from PLAN.md');
-		isRunning = false;
-		return;
-	}
-	log(`Loaded ${steps.length} steps from PLAN.md`);
-
 	let loopsExecuted = 0;
 
 	while (loopsExecuted < config.MAX_AUTONOMOUS_LOOPS && isRunning) {
@@ -295,71 +411,65 @@ async function startRalph(): Promise<void> {
 			break;
 		}
 
-		// Re-read state each iteration (it may have been modified externally)
-		const trackedSteps = parseState(statePath);
-		const nextStep = findNextPending(trackedSteps);
-
-		if (!nextStep) {
-			log('🎉 All steps completed!');
-			vscode.window.showInformationMessage('RALPH: All steps completed!');
+		// Re-read PRD each iteration (it may have been modified externally)
+		const prd = parsePrd(workspaceRoot);
+		if (!prd) {
+			log('ERROR: Could not parse prd.json');
 			break;
 		}
 
-		const stepDef = steps.find(s => s.id === nextStep.id);
-		if (!stepDef) {
-			log(`ERROR: Step ${nextStep.id} exists in state but not in plan. Marking skipped.`);
-			updateStepStatus(statePath, nextStep.id, 'skipped', 'Step not found in PLAN.md');
-			loopsExecuted++;
-			continue;
+		if (prd.userStories.length === 0) {
+			log('ERROR: No user stories found in prd.json');
+			break;
+		}
+
+		log(`Loaded ${prd.userStories.length} user stories from prd.json`);
+
+		const nextStory = findNextPendingStory(prd, workspaceRoot);
+
+		if (!nextStory) {
+			log('🎉 All user stories completed!');
+			vscode.window.showInformationMessage('RALPH: All user stories completed!');
+			break;
 		}
 
 		log('');
 		log(`──── Loop ${loopsExecuted + 1}/${config.MAX_AUTONOMOUS_LOOPS} ────`);
-		log(`Step ${stepDef.id}: [${stepDef.action}] ${stepDef.description}`);
-		log(`Phase: ${stepDef.phase}`);
-
-		// Verify step isn't already done (idempotency guard)
-		const alreadyDone = await verifyStepAlreadyDone(stepDef, workspaceRoot);
-		if (alreadyDone) {
-			log(`⏩ Step ${stepDef.id} verified as already complete — skipping execution.`);
-			updateStepStatus(statePath, stepDef.id, 'done', 'Verified already complete');
-			loopsExecuted++;
-			updateQuickStatus(statePath);
-			continue;
-		}
+		log(`Story ${nextStory.id}: ${nextStory.title}`);
+		log(`Description: ${nextStory.description}`);
+		log(`Priority: ${nextStory.priority}`);
 
 		// Guard: ensure no other task is inprogress before queuing this one.
-		// Under normal sequential operation this resolves immediately; it only
-		// blocks if a stale file somehow slipped through startup recovery.
 		await ensureNoActiveTask(workspaceRoot);
 
 		// ── Persist "inprogress" state to .ralph/task-<id>-status ───────────
-		RalphStateManager.setInProgress(workspaceRoot, stepDef.id);
-		updateStepStatus(statePath, stepDef.id, 'in-progress', '');
-		log(`  Task state written: .ralph/task-${stepDef.id}-status = inprogress`);
+		RalphStateManager.setInProgress(workspaceRoot, nextStory.id);
+		log(`  Task state written: .ralph/task-${nextStory.id}-status = inprogress`);
 
 		try {
-			// executeStep returns only after Copilot has written "completed"
-			// to .ralph/task-<id>-status (or after a terminal step finishes).
-			await executeStep(stepDef, workspaceRoot);
+			// executeStory returns only after Copilot has written "completed"
+			// to .ralph/task-<id>-status (or after a timeout).
+			await executeStory(nextStory, workspaceRoot);
 
-			// Safety net: ensure the lock is always cleared on success,
-			// even if Copilot neglected to write the file (idempotent for all types).
-			RalphStateManager.setCompleted(workspaceRoot, stepDef.id);
-			updateStepStatus(statePath, stepDef.id, 'done', '');
-			log(`✅ Step ${stepDef.id} completed.`);
+			// Safety net: ensure the lock is always cleared on success
+			RalphStateManager.setCompleted(workspaceRoot, nextStory.id);
+
+			// Write completion to progress.txt (prd.json is never modified)
+			writeProgressEntry(workspaceRoot, nextStory.id, 'done', 'Completed successfully');
+
+			log(`✅ Story ${nextStory.id} completed.`);
 		} catch (err: unknown) {
 			const errMsg = err instanceof Error ? err.message : String(err);
-			log(`❌ Step ${stepDef.id} failed: ${errMsg}`);
+			log(`❌ Story ${nextStory.id} failed: ${errMsg}`);
+
 			// Always release the inprogress lock so the loop can advance
-			RalphStateManager.setCompleted(workspaceRoot, stepDef.id);
-			updateStepStatus(statePath, stepDef.id, 'failed', errMsg);
+			RalphStateManager.setCompleted(workspaceRoot, nextStory.id);
+
+			// Write failure to progress.txt (prd.json is never modified)
+			writeProgressEntry(workspaceRoot, nextStory.id, 'failed', errMsg);
 		}
 
 		loopsExecuted++;
-
-		// Update the quick status summary in STATUS.md
-		updateQuickStatus(statePath);
 
 		// Small delay to let VS Code settle
 		await sleep(config.LOOP_DELAY_MS);
@@ -389,162 +499,51 @@ function stopRalph(): void {
 	updateStatusBar('idle');
 }
 
-// ── Step Execution ──────────────────────────────────────────────────────────
+// ── Story Execution ─────────────────────────────────────────────────────────
 
-async function executeStep(step: PlanStep, workspaceRoot: string): Promise<void> {
-	switch (step.action) {
-		case 'run_terminal':
-			await executeTerminal(step, workspaceRoot);
-			break;
-		case 'create_file':
-			await executeCreateFile(step, workspaceRoot);
-			break;
-		case 'copilot_task':
-			await executeCopilotTask(step, workspaceRoot);
-			break;
-		default:
-			throw new Error(`Unknown action type: ${step.action}`);
-	}
-}
-
-async function executeTerminal(step: PlanStep, workspaceRoot: string): Promise<void> {
-	let command = step.command;
-	if (!command) {
-		throw new Error('run_terminal step has no command');
-	}
-
-	// Detect the default shell and adjust command chaining for PowerShell
-	const shell = vscode.workspace.getConfiguration('terminal').get<string>('integrated.defaultProfile.windows');
-	if (shell && shell.toLowerCase().includes('powershell')) {
-		// Replace '&&' with ';' for PowerShell compatibility
-		command = command.replace(/&&/g, ';');
-	}
-
-	log(`  Running: ${command}`);
-
-	return new Promise<void>((resolve, reject) => {
-		const terminal = vscode.window.createTerminal({
-			name: `RALPH Step ${step.id}`,
-			cwd: workspaceRoot
-		});
-		terminal.show(false);
-		terminal.sendText(command);
-		// We use a marker to detect completion
-		const marker = `__RALPH_DONE_${step.id}_${Date.now()}__`;
-		terminal.sendText(`echo ${marker}`);
-
-		// Wait for the terminal to finish (poll-based since VS Code API doesn't
-		// offer a direct "command finished" event for sendText)
-		const timeout = setTimeout(() => {
-			terminal.dispose();
-			resolve(); // Best-effort: assume it completed
-		}, 60_000); // 60s timeout for terminal commands
-
-		const closeListener = vscode.window.onDidCloseTerminal(t => {
-			if (t === terminal) {
-				clearTimeout(timeout);
-				closeListener.dispose();
-				resolve();
-			}
-		});
-
-		// Auto-close after a reasonable wait for non-interactive commands
-		setTimeout(() => {
-			clearTimeout(timeout);
-			closeListener.dispose();
-			terminal.dispose();
-			resolve();
-		}, 15_000);
-	});
-
-	// Terminal steps are fully controlled by RALPH — write completed now.
-	RalphStateManager.setCompleted(workspaceRoot, step.id);
-	log(`  Task state written: .ralph/task-${step.id}-status = completed`);
-}
-
-async function executeCreateFile(step: PlanStep, workspaceRoot: string): Promise<void> {
-	if (!step.path) {
-		throw new Error('create_file step has no path');
-	}
-
-	// Delegate to Copilot to generate the file content based on the description
-	const prompt = buildCopilotPrompt(step, workspaceRoot);
-	log(`  Delegating file creation to Copilot: ${step.path}`);
-	await sendToCopilot(prompt, step.id, workspaceRoot);
-}
-
-async function executeCopilotTask(step: PlanStep, workspaceRoot: string): Promise<void> {
-	const prompt = buildCopilotPrompt(step, workspaceRoot);
-	log('  Delegating task to Copilot...');
-	await sendToCopilot(prompt, step.id, workspaceRoot);
+async function executeStory(story: UserStory, workspaceRoot: string): Promise<void> {
+	const prompt = buildCopilotPromptForStory(story, workspaceRoot);
+	log('  Delegating user story to Copilot...');
+	await sendToCopilot(prompt, story.id, workspaceRoot);
 }
 
 // ── Copilot Integration ─────────────────────────────────────────────────────
 
-function buildCopilotPrompt(step: PlanStep, workspaceRoot: string): string {
-	const stateSnippet = [
-		`You are executing Step ${step.id} of the current plan.`,
-		`Phase: ${step.phase}`,
-		`Action: ${step.action}`,
-		`Description: ${step.description}`,
+function buildCopilotPromptForStory(story: UserStory, workspaceRoot: string): string {
+	const lines = [
+		`You are executing User Story ${story.id} of the current PRD.`,
+		`Title: ${story.title}`,
+		`Description: ${story.description}`,
+		`Priority: ${story.priority}`,
 		`Workspace root: ${workspaceRoot}`,
-		''
-	];
-
-	switch (step.action) {
-		case 'create_file':
-			stateSnippet.push(
-				`Create the file at: ${step.path}`,
-				`File purpose: ${step.description}`,
-				'',
-				'Generate the COMPLETE file content and create it. Do not ask questions — infer best practices.',
-				'After creating the file, confirm it was created.'
-			);
-			break;
-
-		case 'copilot_task':
-			stateSnippet.push(
-				'Execute the following task:',
-				'',
-				step.instruction || step.description,
-				'',
-				'Greedily execute as many sub-tasks as possible in a single pass.',
-				'If something partially fails, keep all the parts that passed and do not revert them.',
-				'Do not ask questions — execute directly.',
-				'Make the actual code changes to the files in the workspace.',
-				'Mark the task as in-progress in STATUS.md and exit when done.',
-				'After completing all changes, confirm what was done.'
-			);
-			break;
-
-		case 'run_terminal':
-			stateSnippet.push(
-				`Run the following command in the terminal:`,
-				`\`\`\``,
-				step.command || '',
-				`\`\`\``,
-				'',
-				'Execute the command and report the result.'
-			);
-			break;
-	}
-
-	// ── Completion signal ───────────────────────────────────────────────────
-	// RALPH polls this file to know when Copilot has finished the task.
-	// Copilot MUST write this file as the very last action of its response.
-	stateSnippet.push(
+		'',
+		'Acceptance Criteria:',
+		...story.acceptanceCriteria.map((ac, i) => `  ${i + 1}. ${ac}`),
+		'',
+		'Execute the following task:',
+		'',
+		story.description,
+		'',
+		'Greedily execute as many sub-tasks as possible in a single pass.',
+		'If something partially fails, keep all the parts that passed and do not revert them.',
+		'Do not ask questions — execute directly.',
+		'Make the actual code changes to the files in the workspace.',
+		'After completing all changes, confirm what was done.',
+		'',
+		'⚠️ IMPORTANT: Do NOT modify prd.json. Never edit, overwrite, or update prd.json for any reason.',
+		'Progress is tracked separately — your only responsibility is to execute the task and write the completion signal below.',
 		'',
 		'━━━ TASK COMPLETION SIGNAL (REQUIRED) ━━━',
 		`When you have fully completed ALL work for this task, write the exact text \`completed\``,
-		`(nothing else, no newline) to the file: ${path.join(workspaceRoot, RALPH_DIR, `task-${step.id}-status`).replace(/\\/g, '/')}`,
+		`(nothing else, no newline) to the file: ${path.join(workspaceRoot, RALPH_DIR, `task-${story.id}-status`).replace(/\\/g, '/')}`,
 		'This is how RALPH knows the task is done and can move to the next step.',
 		'Do NOT skip this step — without it RALPH will time out waiting.',
-	);
+	];
 
-	return stateSnippet.join('\n');
+	return lines.join('\n');
 }
 
-async function sendToCopilot(prompt: string, taskId: number, workspaceRoot: string): Promise<void> {
+async function sendToCopilot(prompt: string, taskId: string, workspaceRoot: string): Promise<void> {
 	log('  Sending prompt to Copilot Chat...');
 
 	try {
@@ -576,7 +575,7 @@ async function sendToCopilot(prompt: string, taskId: number, workspaceRoot: stri
  * has time to begin working before the first read.
  * Throws if the timeout is exceeded without seeing "completed".
  */
-async function waitForCopilotCompletion(taskId: number, workspaceRoot: string): Promise<void> {
+async function waitForCopilotCompletion(taskId: string, workspaceRoot: string): Promise<void> {
 	const config = getConfig();
 	log(`  Waiting for Copilot to write "completed" to .ralph/task-${taskId}-status...`);
 
@@ -612,8 +611,6 @@ async function waitForCopilotCompletion(taskId: number, workspaceRoot: string): 
 /**
  * Block until no .ralph/task-*-status file contains "inprogress".
  * Under normal sequential operation this resolves immediately.
- * It only waits if a stale lock file was not cleared during startup recovery
- * (e.g. the directory was manually created or a concurrent process wrote it).
  * Polls every COPILOT_RESPONSE_POLL_MS and times out after COPILOT_TIMEOUT_MS.
  */
 async function ensureNoActiveTask(workspaceRoot: string): Promise<void> {
@@ -653,208 +650,37 @@ async function ensureNoActiveTask(workspaceRoot: string): Promise<void> {
 	}
 }
 
-// ── Step Verification ───────────────────────────────────────────────────────
-// Requirement 3: Before executing any step, do a quick check to see if the
-// step's outcome already exists in the workspace (regardless of state file).
-
-async function verifyStepAlreadyDone(step: PlanStep, workspaceRoot: string): Promise<boolean> {
-	switch (step.action) {
-		case 'create_file': {
-			if (!step.path) { return false; }
-			const fullPath = path.join(workspaceRoot, step.path);
-			if (fs.existsSync(fullPath)) {
-				try {
-					const stat = fs.statSync(fullPath);
-					if (stat.size > 0) {
-						log(`  ✓ Verified: File already exists: ${step.path} (${stat.size} bytes)`);
-						return true;
-					}
-				} catch { /* file vanished between exists and stat — not done */ }
-			}
-			return false;
-		}
-
-		case 'run_terminal': {
-			if (!step.command) { return false; }
-			// mkdir: check if directory already exists
-			const mkdirMatch = step.command.match(/mkdir\s+(?:-p\s+)?["']?([^"'\s]+)["']?/);
-			if (mkdirMatch) {
-				const dir = path.isAbsolute(mkdirMatch[1])
-					? mkdirMatch[1]
-					: path.join(workspaceRoot, mkdirMatch[1]);
-				if (fs.existsSync(dir)) {
-					log(`  ✓ Verified: Directory already exists: ${mkdirMatch[1]}`);
-					return true;
-				}
-			}
-			// npm install: check for node_modules and package-lock.json
-			if (/npm\s+(install|i|ci)\b/.test(step.command)) {
-				const lockFile = path.join(workspaceRoot, 'package-lock.json');
-				const nodeModules = path.join(workspaceRoot, 'node_modules');
-				if (fs.existsSync(lockFile) && fs.existsSync(nodeModules)) {
-					log('  ✓ Verified: node_modules and package-lock.json already exist');
-					return true;
-				}
-			}
-			// git init: check for .git directory
-			if (/git\s+init\b/.test(step.command)) {
-				if (fs.existsSync(path.join(workspaceRoot, '.git'))) {
-					log('  ✓ Verified: .git directory already exists');
-					return true;
-				}
-			}
-			return false;
-		}
-
-		case 'copilot_task': {
-			// Copilot tasks are general-purpose — we cannot reliably verify their
-			// outcome without understanding the task detail. Return false so the
-			// step is always re-evaluated.
-			return false;
-		}
-
-		default:
-			return false;
-	}
-}
-
-// ── PLAN.md Parser ──────────────────────────────────────────────────────────
-
-function parsePlan(planPath: string): PlanStep[] {
-	const content = fs.readFileSync(planPath, 'utf-8');
-
-	// Extract the JSON block between ```json and ```
-	const jsonMatch = content.match(/```json\s*\n([\s\S]*?)\n```/);
-	if (!jsonMatch) {
-		log('ERROR: Could not find ```json block in PLAN.md');
-		return [];
-	}
-
-	try {
-		const parsed = JSON.parse(jsonMatch[1]);
-		const steps: PlanStep[] = parsed.steps || [];
-		return steps;
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
-		log(`ERROR: Failed to parse JSON from PLAN.md: ${msg}`);
-		return [];
-	}
-}
-
-// ── STATUS.md Parser & Writer ────────────────────────────────────────────────
-
-function parseState(statePath: string): TrackedStep[] {
-	const content = fs.readFileSync(statePath, 'utf-8');
-	const steps: TrackedStep[] = [];
-
-	// Match table rows: | 1 | Phase ... | `action` — desc | `status` | timestamp | notes |
-	const rowRegex = /^\|\s*(\d+)\s*\|[^|]*\|[^|]*\|\s*`(\w[\w-]*)`\s*\|([^|]*)\|([^|]*)\|$/gm;
-	let match: RegExpExecArray | null;
-
-	while ((match = rowRegex.exec(content)) !== null) {
-		steps.push({
-			id: parseInt(match[1], 10),
-			status: match[2].trim() as StepStatus,
-			timestamp: match[3].trim(),
-			notes: match[4].trim()
-		});
-	}
-
-	return steps;
-}
-
-function findNextPending(tracked: TrackedStep[]): TrackedStep | null {
-	// Sort by step ID so we always scan from Step 1 upward
-	const sorted = [...tracked].sort((a, b) => a.id - b.id);
-
-	// Walk through every step in order and return the first one that
-	// is NOT done and NOT skipped. This catches earlier steps that were
-	// missed even if later steps are already complete.
-	return sorted.find(s => s.status !== 'done' && s.status !== 'skipped') || null;
-}
-
-function updateStepStatus(statePath: string, stepId: number, status: StepStatus, notes: string): void {
-	let content = fs.readFileSync(statePath, 'utf-8');
-	const timestamp = status === 'done' || status === 'failed'
-		? new Date().toISOString().replace('T', ' ').slice(0, 19)
-		: '';
-
-	// Match the specific row for this step ID
-	// Pattern: | <id> | <phase> | <action> | `<old_status>` | <old_timestamp> | <old_notes> |
-	const rowRegex = new RegExp(
-		`^(\\|\\s*${stepId}\\s*\\|[^|]*\\|[^|]*\\|)\\s*\`\\w[\\w-]*\`\\s*\\|([^|]*)\\|([^|]*)\\|$`,
-		'm'
-	);
-
-	const replacement = `$1 \`${status}\` | ${timestamp} | ${notes} |`;
-	content = content.replace(rowRegex, replacement);
-	fs.writeFileSync(statePath, content, 'utf-8');
-}
-
-function updateQuickStatus(statePath: string): void {
-	const tracked = parseState(statePath);
-	const total = tracked.length;
-	const completed = tracked.filter(s => s.status === 'done').length;
-	const inProgress = tracked.filter(s => s.status === 'in-progress').length;
-	const failed = tracked.filter(s => s.status === 'failed').length;
-	const pending = tracked.filter(s => s.status === 'pending').length;
-	const skipped = tracked.filter(s => s.status === 'skipped').length;
-
-	let content = fs.readFileSync(statePath, 'utf-8');
-
-	// Update the Quick Status counts
-	content = content.replace(/\| Total Steps \| \d+ \|/, `| Total Steps | ${total} |`);
-	content = content.replace(/\| Completed \| \d+ \|/, `| Completed | ${completed} |`);
-	content = content.replace(/\| In Progress \| \d+ \|/, `| In Progress | ${inProgress} |`);
-	content = content.replace(/\| Failed \| \d+ \|/, `| Failed | ${failed} |`);
-	content = content.replace(/\| Pending \| \d+ \|/, `| Pending | ${pending + skipped} |`);
-
-	// Update current phase
-	const lastDone = [...tracked].reverse().find(s => s.status === 'done');
-	const currentStep = tracked.find(s => s.status === 'in-progress' || s.status === 'pending');
-	const currentPhase = currentStep ? `Step ${currentStep.id}` : 'All Complete';
-	const lastCompleted = lastDone ? `Step ${lastDone.id}` : '—';
-
-	content = content.replace(
-		/\*\*Current Phase:\*\* .*/,
-		`**Current Phase:** ${currentPhase}`
-	);
-	content = content.replace(
-		/\*\*Last Completed Step:\*\* .*/,
-		`**Last Completed Step:** ${lastCompleted}`
-	);
-
-	fs.writeFileSync(statePath, content, 'utf-8');
-	log(`  State updated: ${completed} done, ${failed} failed, ${pending} pending`);
-}
-
 // ── Status & Reset Commands ─────────────────────────────────────────────────
 
 async function showStatus(): Promise<void> {
 	const workspaceRoot = getWorkspaceRoot();
 	if (!workspaceRoot) { return; }
 
-	const statePath = path.join(workspaceRoot, 'STATUS.md');
-	if (!fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('STATUS.md not found.');
+	const prd = parsePrd(workspaceRoot);
+	if (!prd) {
+		vscode.window.showErrorMessage('prd.json not found or invalid.');
 		return;
 	}
 
-	const tracked = parseState(statePath);
-	const completed = tracked.filter(s => s.status === 'done').length;
-	const failed = tracked.filter(s => s.status === 'failed').length;
-	const pending = tracked.filter(s => s.status === 'pending').length;
-	const inProgress = tracked.find(s => s.status === 'in-progress');
-	const nextPending = tracked.find(s => s.status === 'pending');
+	const progress = readProgress(workspaceRoot);
+	const doneIds = new Set(progress.filter(e => e.status === 'done').map(e => e.id));
+	const failedIds = new Set(progress.filter(e => e.status === 'failed').map(e => e.id));
+
+	const total = prd.userStories.length;
+	const completed = prd.userStories.filter(s => doneIds.has(s.id)).length;
+	const failed = prd.userStories.filter(s => failedIds.has(s.id)).length;
+	const pending = total - completed;
+	const inProgress = RalphStateManager.getInProgressTaskId(workspaceRoot);
+	const nextPending = findNextPendingStory(prd, workspaceRoot);
 
 	const lines = [
-		`RALPH Status`,
+		`RALPH Status — ${prd.project}`,
 		``,
-		`✅ Completed: ${completed}/${tracked.length}`,
+		`✅ Completed: ${completed}/${total}`,
 		`❌ Failed: ${failed}`,
 		`⏳ Pending: ${pending}`,
-		`🔄 In Progress: ${inProgress ? `Step ${inProgress.id}` : 'None'}`,
-		`📍 Next: ${nextPending ? `Step ${nextPending.id}` : 'All done!'}`,
+		`🔄 In Progress: ${inProgress || 'None'}`,
+		`📍 Next: ${nextPending ? `${nextPending.id} — ${nextPending.title}` : 'All done!'}`,
 		``,
 		`Running: ${isRunning ? 'Yes' : 'No'}`
 	];
@@ -862,43 +688,49 @@ async function showStatus(): Promise<void> {
 	outputChannel.show(true);
 	log(lines.join('\n'));
 	vscode.window.showInformationMessage(
-		`RALPH: ${completed}/${tracked.length} steps done. ${failed} failed. ` +
-		`Next: ${nextPending ? `Step ${nextPending.id}` : 'Complete!'}`
+		`RALPH: ${completed}/${total} stories done. ` +
+		`Next: ${nextPending ? nextPending.id : 'Complete!'}`
 	);
 }
 
-async function resetStep(): Promise<void> {
+async function resetStory(): Promise<void> {
 	const workspaceRoot = getWorkspaceRoot();
 	if (!workspaceRoot) { return; }
 
-	const statePath = path.join(workspaceRoot, 'STATUS.md');
-	if (!fs.existsSync(statePath)) {
-		vscode.window.showErrorMessage('STATUS.md not found.');
+	const prd = parsePrd(workspaceRoot);
+	if (!prd) {
+		vscode.window.showErrorMessage('prd.json not found or invalid.');
 		return;
 	}
 
-	const tracked = parseState(statePath);
-	const failedOrDone = tracked.filter(s => s.status === 'failed' || s.status === 'done' || s.status === 'in-progress');
-	if (failedOrDone.length === 0) {
-		vscode.window.showInformationMessage('No steps to reset.');
+	const progress = readProgress(workspaceRoot);
+	const trackedIds = new Set(progress.map(e => e.id));
+	const trackedStories = prd.userStories.filter(s => trackedIds.has(s.id));
+
+	if (trackedStories.length === 0) {
+		vscode.window.showInformationMessage('No completed or failed stories to reset.');
 		return;
 	}
 
-	const items = failedOrDone.map(s => ({
-		label: `Step ${s.id}`,
-		description: `[${s.status}] ${s.notes || ''}`,
-		stepId: s.id
-	}));
+	const items = trackedStories.map(s => {
+		const entry = progress.find(e => e.id === s.id);
+		return {
+			label: `${s.id} — ${s.title}`,
+			description: entry ? `[${entry.status}] ${entry.notes}` : '',
+			storyId: s.id
+		};
+	});
 
 	const selection = await vscode.window.showQuickPick(items, {
-		placeHolder: 'Select a step to reset to pending'
+		placeHolder: 'Select a user story to reset'
 	});
 
 	if (selection) {
-		updateStepStatus(statePath, selection.stepId, 'pending', '');
-		updateQuickStatus(statePath);
-		vscode.window.showInformationMessage(`Step ${selection.stepId} reset to pending.`);
-		log(`Step ${selection.stepId} reset to pending by user.`);
+		removeProgressEntry(workspaceRoot, selection.storyId);
+		// Also clear the .ralph status file if present
+		RalphStateManager.clearStalledTask(workspaceRoot, selection.storyId);
+		vscode.window.showInformationMessage(`Story ${selection.storyId} reset.`);
+		log(`Story ${selection.storyId} reset by user.`);
 	}
 }
 
@@ -935,11 +767,11 @@ function updateStatusBar(state: 'idle' | 'running'): void {
 
 async function showCommandMenu(): Promise<void> {
 	const items: vscode.QuickPickItem[] = [
-		{ label: '$(zap)  Generate plan', description: 'Initialize plan & status files (or generate them via Copilot)' },
+		{ label: '$(zap)  Generate PRD', description: 'Generate prd.json via Copilot' },
 		{ label: '$(play)  Start', description: 'Begin or resume the autonomous task loop' },
 		{ label: '$(debug-stop)  Stop', description: 'Cancel the current run' },
-		{ label: '$(info)  Show Status', description: 'Display step progress summary' },
-		{ label: '$(debug-restart)  Reset Step', description: 'Reset a completed or failed step to pending' },
+		{ label: '$(info)  Show Status', description: 'Display user story progress summary' },
+		{ label: '$(debug-restart)  Reset Story', description: 'Reset a completed user story' },
 		{ label: '$(gear)  Open Settings', description: 'Configure RALPH Runner options' },
 	];
 
@@ -950,11 +782,11 @@ async function showCommandMenu(): Promise<void> {
 	if (!selected) { return; }
 
 	const commandMap: Record<string, string> = {
-		'$(zap)  Generate plan': 'ralph-runner.quickStart',
+		'$(zap)  Generate PRD': 'ralph-runner.quickStart',
 		'$(play)  Start': 'ralph-runner.start',
 		'$(debug-stop)  Stop': 'ralph-runner.stop',
 		'$(info)  Show Status': 'ralph-runner.status',
-		'$(debug-restart)  Reset Step': 'ralph-runner.resetStep',
+		'$(debug-restart)  Reset Story': 'ralph-runner.resetStep',
 		'$(gear)  Open Settings': 'ralph-runner.openSettings',
 	};
 
@@ -965,11 +797,11 @@ async function showCommandMenu(): Promise<void> {
 }
 
 // ── Quick Start ─────────────────────────────────────────────────────────────
-// Guides the user through setting up PLAN.md and STATUS.md.
-// 1. Checks if the files already exist in the workspace root.
-// 2. If missing, asks the user to provide paths to existing files.
-// 3. If the user doesn't have them, asks what they want to accomplish and
-//    uses Copilot to generate both files in the expected format.
+// Guides the user through setting up prd.json.
+// 1. Checks if prd.json already exists in the workspace root.
+// 2. If missing, asks the user to provide a path to an existing file.
+// 3. If the user doesn't have one, asks what they want to accomplish and
+//    uses Copilot to generate prd.json in the expected format.
 
 async function quickStart(): Promise<void> {
 	const workspaceRoot = getWorkspaceRoot();
@@ -980,129 +812,95 @@ async function quickStart(): Promise<void> {
 
 	outputChannel.show(true);
 	log('═══════════════════════════════════════════════════');
-	log('RALPH Generate Plan');
+	log('RALPH Generate PRD');
 	log('═══════════════════════════════════════════════════');
 
-	const planPath = path.join(workspaceRoot, 'PLAN.md');
-	const statePath = path.join(workspaceRoot, 'STATUS.md');
+	const prdPath = getPrdPath(workspaceRoot);
+	const prdExists = fs.existsSync(prdPath);
 
-	const planExists = fs.existsSync(planPath);
-	const stateExists = fs.existsSync(statePath);
-
-	// ── Case 1: Both files already exist ────────────────────────────────────
-	if (planExists && stateExists) {
-		log('Both PLAN.md and STATUS.md already exist.');
+	// ── Case 1: File already exists ─────────────────────────────────────────
+	if (prdExists) {
+		log('prd.json already exists.');
 		const action = await vscode.window.showInformationMessage(
-			'RALPH: PLAN.md and STATUS.md already exist in the workspace root.',
-			'Start', 'Open Plan', 'Open Status'
+			'RALPH: prd.json already exists in the workspace root.',
+			'Start', 'Open PRD'
 		);
 		if (action === 'Start') {
 			vscode.commands.executeCommand('ralph-runner.start');
-		} else if (action === 'Open Plan') {
-			const doc = await vscode.workspace.openTextDocument(planPath);
-			vscode.window.showTextDocument(doc);
-		} else if (action === 'Open Status') {
-			const doc = await vscode.workspace.openTextDocument(statePath);
+		} else if (action === 'Open PRD') {
+			const doc = await vscode.workspace.openTextDocument(prdPath);
 			vscode.window.showTextDocument(doc);
 		}
 		return;
 	}
 
-	// ── Case 2: One or both files missing — ask user how to proceed ─────────
-	const missingFiles: string[] = [];
-	if (!planExists) { missingFiles.push('PLAN.md'); }
-	if (!stateExists) { missingFiles.push('STATUS.md'); }
-
-	log(`Missing: ${missingFiles.join(', ')}`);
+	// ── Case 2: File missing — ask user how to proceed ──────────────────────
+	log('prd.json not found — prompting user.');
 
 	const choice = await vscode.window.showQuickPick(
 		[
 			{
-				label: '$(file-directory) I have these files — let me provide the path',
-				description: 'Browse for existing PLAN.md and STATUS.md files',
+				label: '$(file-directory) I have this file — let me provide the path',
+				description: 'Browse for an existing prd.json file',
 				value: 'provide'
 			},
 			{
-				label: '$(sparkle) I don\'t have them — generate via Copilot',
-				description: 'Describe your goal and let Copilot create both files',
+				label: '$(sparkle) I don\'t have it — generate via Copilot',
+				description: 'Describe your goal and let Copilot create prd.json',
 				value: 'generate'
 			}
 		],
-		{ placeHolder: `${missingFiles.join(' and ')} not found in workspace root. How would you like to proceed?` }
+		{ placeHolder: 'prd.json not found in workspace root. How would you like to proceed?' }
 	);
 
 	if (!choice) { return; }
 
 	if (choice.value === 'provide') {
-		await quickStartProvideFiles(planPath, statePath, planExists, stateExists);
+		await quickStartProvideFile(prdPath);
 	} else {
-		await quickStartGenerate(planPath, statePath, workspaceRoot);
+		await quickStartGenerate(workspaceRoot);
 	}
 }
 
 /**
- * Let the user browse for existing PLAN.md / STATUS.md files
- * and copy them into the workspace root.
+ * Let the user browse for an existing prd.json file
+ * and copy it into the workspace root.
  */
-async function quickStartProvideFiles(
-	planPath: string, statePath: string,
-	planExists: boolean, stateExists: boolean
-): Promise<void> {
-	if (!planExists) {
-		const uris = await vscode.window.showOpenDialog({
-			title: 'Select your PLAN.md file',
-			canSelectMany: false,
-			canSelectFolders: false,
-			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
-			openLabel: 'Select PLAN.md'
-		});
-		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no PLAN.md selected.');
-			return;
-		}
-		const srcPath = uris[0].fsPath;
-		fs.copyFileSync(srcPath, planPath);
-		log(`Copied PLAN.md from ${srcPath}`);
+async function quickStartProvideFile(prdPath: string): Promise<void> {
+	const uris = await vscode.window.showOpenDialog({
+		title: 'Select your prd.json file',
+		canSelectMany: false,
+		canSelectFolders: false,
+		filters: { 'JSON': ['json'], 'All Files': ['*'] },
+		openLabel: 'Select prd.json'
+	});
+
+	if (!uris || uris.length === 0) {
+		vscode.window.showWarningMessage('RALPH: Cancelled — no prd.json selected.');
+		return;
 	}
 
-	if (!stateExists) {
-		const uris = await vscode.window.showOpenDialog({
-			title: 'Select your STATUS.md file',
-			canSelectMany: false,
-			canSelectFolders: false,
-			filters: { 'Markdown': ['md'], 'All Files': ['*'] },
-			openLabel: 'Select STATUS.md'
-		});
-		if (!uris || uris.length === 0) {
-			vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no STATUS.md selected.');
-			return;
-		}
-		const srcPath = uris[0].fsPath;
-		fs.copyFileSync(srcPath, statePath);
-		log(`Copied STATUS.md from ${srcPath}`);
-	}
-
-	vscode.window.showInformationMessage('RALPH: Plan and status files are ready! You can now run "RALPH: Start".');
-	log('Generate Plan complete — files placed in workspace root.');
+	const srcPath = uris[0].fsPath;
+	fs.copyFileSync(srcPath, prdPath);
+	log(`Copied prd.json from ${srcPath}`);
+	vscode.window.showInformationMessage('RALPH: prd.json is ready! You can now run "RALPH: Start".');
+	log('Generate PRD complete — file placed in workspace root.');
 }
 
 /**
  * Ask the user what they want to accomplish, then send a Copilot prompt that
- * generates both PLAN.md and STATUS.md in the expected
- * formats used by the RALPH Runner extension.
+ * generates prd.json in the expected format used by the RALPH Runner extension.
  */
-async function quickStartGenerate(
-	planPath: string, statePath: string, workspaceRoot: string
-): Promise<void> {
+async function quickStartGenerate(workspaceRoot: string): Promise<void> {
 	const userGoal = await vscode.window.showInputBox({
-		title: 'RALPH Generate Plan — Describe your goal',
+		title: 'RALPH Generate PRD — Describe your goal',
 		prompt: 'What are you trying to accomplish? (e.g. "Fix all TypeScript errors", "Add unit tests for all services", "Migrate from jQuery to React")',
 		placeHolder: 'Describe what you want to accomplish…',
 		ignoreFocusOut: true
 	});
 
 	if (!userGoal || userGoal.trim().length === 0) {
-		vscode.window.showWarningMessage('RALPH Generate Plan cancelled — no goal provided.');
+		vscode.window.showWarningMessage('RALPH: Cancelled — no goal provided.');
 		return;
 	}
 
@@ -1130,55 +928,47 @@ async function quickStartGenerate(
 	}
 
 	vscode.window.showInformationMessage(
-		'RALPH: Copilot is generating your plan files. Once they appear in the workspace root, run "RALPH: Start".'
+		'RALPH: Copilot is generating your prd.json. Once it appears in the workspace root, run "RALPH: Start".'
 	);
-	log('Generate Plan prompt sent to Copilot. Waiting for file generation…');
+	log('Generate PRD prompt sent to Copilot. Waiting for file generation…');
 }
 
 /**
- * Builds the Copilot prompt that instructs it to generate PLAN.md
- * and STATUS.md in the exact formats the RALPH Runner expects.
+ * Builds the Copilot prompt that instructs it to generate prd.json
+ * in the exact format the RALPH Runner expects.
  */
 function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string {
 	return [
-		`The user wants to accomplish the following goal:`,
-		``,
-		`> ${userGoal}`,
+		'Go through entire codebase and understand the code.',
+		`The user wants to accomplish the following goal: ${userGoal}`,
 		``,
 		`Workspace root: ${workspaceRoot}`,
 		``,
-		`Please analyze the workspace and generate TWO files in the workspace root:`,
+		`Please analyze the workspace and generate one file in the workspace root called prd.json following the syntax below.`,
 		``,
-		`────────────────────────────────────────────────────`,
-		`FILE 1: PLAN.md`,
-		`────────────────────────────────────────────────────`,
-		``,
-		`This file must contain a \`\`\`json code block with the following structure:`,
-		``,
-		'```',
-		`{`,
-		`  "steps": [`,
-		`    {`,
-		`      "id": 1,`,
-		`      "phase": "Phase name (e.g. Setup, Analysis, Implementation, Testing)",`,
-		`      "action": "run_terminal | create_file | copilot_task",`,
-		`      "command": "(only for run_terminal) the shell command to run",`,
-		`      "path": "(only for create_file) relative path of the file to create",`,
-		`      "instruction": "(only for copilot_task) detailed instruction for Copilot",`,
-		`      "description": "Human-readable description of what this step does"`,
-		`    }`,
-		`  ]`,
-		`}`,
+		'```json',
+		'{',
+		'  "project": "<ProjectName>",',
+		'  "branchName": "ralph/<branchName>",',
+		'  "description": "<Short Description of user request>",',
+		'  "userStories": [',
+		'    {',
+		'      "id": "US-001",',
+		'      "title": "Setup Project Structure and Enums",',
+		'      "description": "Setup Project Structure and Enums",',
+		'      "acceptanceCriteria": ["Setup Project Structure and Enums"],',
+		'      "priority": 1',
+		'    }',
+		'  ]',
+		'}',
 		'```',
 		``,
-		`Action types:`,
-		`- "run_terminal": executes a shell command (requires "command" field)`,
-		`- "create_file": creates a file at the given path (requires "path" field)`,
-		`- "copilot_task": a general Copilot coding task (requires "instruction" field)`,
-		``,
-		`The plan should have a logical sequence of steps organized into phases.`,
-		`Each step should be granular enough to be independently executable and verifiable.`,
-		`Number steps sequentially starting from 1.`,
+		`INSTRUCTIONS:`,
+		`- If the user forgot to provide a goal, ask him again to provide one. A goal is mandatory. If the provided goal is generic/placeholder/not clear enough. Ask again.`,
+		`- The json should have a logical sequence of user stories organized into phases.`,
+		`- Each user story should be granular enough to be independently executable and verifiable.`,
+		`- Number user stories sequentially starting from "US-001".`,
+		`- Do NOT include "passes" or "notes" fields in the user stories. Progress is tracked separately.`,
 		``,
 		`IMPORTANT:`,
 		`- DO NOT use any absolute, user-specific, or local system-specific paths, directories, namespaces, or usernames in any command or file path.`,
@@ -1187,40 +977,9 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		`- Do not use commands that reference your own username, home directory, or machine-specific details.`,
 		`- The plan must be fully shareable and portable.`,
 		``,
-		`────────────────────────────────────────────────────`,
-		`FILE 2: STATUS.md`,
-		`────────────────────────────────────────────────────`,
-		``,
-		`This file tracks progress. It MUST contain:`,
-		``,
-		`1. A Quick Status section with this exact table format:`,
-		``,
-		`| Metric | Count |`,
-		`|--------|-------|`,
-		`| Total Steps | <N> |`,
-		`| Completed | 0 |`,
-		`| In Progress | 0 |`,
-		`| Failed | 0 |`,
-		`| Pending | <N> |`,
-		``,
-		`**Current Phase:** Step 1`,
-		`**Last Completed Step:** —`,
-		``,
-		`2. A detailed step tracking table with this exact format:`,
-		``,
-		`| Step | Phase | Action | Status | Timestamp | Notes |`,
-		`|------|-------|--------|--------|-----------|-------|`,
-		`| 1 | Phase name | \`action\` — description | \`pending\` | | |`,
-		``,
-		`One row per step matching the plan. All steps should start as \`pending\`.`,
-		``,
-		`────────────────────────────────────────────────────`,
-		``,
 		`IMPORTANT:`,
-		`- Create BOTH files at the workspace root: ${workspaceRoot}`,
-		`- The JSON in PLAN.md must be inside a \`\`\`json fenced code block`,
-		`- The state table rows must follow the exact pipe-delimited format shown above`,
-		`- Be thorough: include all necessary steps for the user's goal`,
-		`- Actually create the files — do not just show their content`,
+		`- Create the file at the workspace root: ${workspaceRoot}`,
+		`- Be thorough: include all necessary user stories for the user's goal`,
+		`- Actually create the file — do not just show its content`,
 	].join('\n');
 }
