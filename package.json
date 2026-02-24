@@ -110,5 +110,5 @@
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2"
   },
-  "icon": "images/ralph_runner.png"
+  "icon": "images/ralph_runner.ico"
 }
