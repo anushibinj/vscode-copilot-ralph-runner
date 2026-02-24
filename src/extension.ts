@@ -969,6 +969,8 @@ function buildQuickStartPrompt(userGoal: string, workspaceRoot: string): string 
 		`- Each user story should be granular enough to be independently executable and verifiable.`,
 		`- Number user stories sequentially starting from "US-001".`,
 		`- Do NOT include "passes" or "notes" fields in the user stories. Progress is tracked separately.`,
+		`- After EVERY user story, insert a git commit user story. This story should stage all changes and commit them with a meaningful message describing what was done in the preceding user story. For example: { "id": "US-002", "title": "Git Commit: Setup Project Structure", "description": "Stage all changes and commit to git with message: 'feat: setup project structure and enums'", "acceptanceCriteria": ["All changes are staged", "Changes are committed with a descriptive message"], "priority": 2 }.`,
+		`- The git commit stories must use conventional commit message format (feat:, fix:, refactor:, docs:, chore:, etc.).`,
 		``,
 		`IMPORTANT:`,
 		`- DO NOT use any absolute, user-specific, or local system-specific paths, directories, namespaces, or usernames in any command or file path.`,
