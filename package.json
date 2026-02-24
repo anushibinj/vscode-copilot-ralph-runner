@@ -2,7 +2,7 @@
   "name": "ralph-runner",
   "displayName": "ralph-runner",
   "description": "Autonomous task runner — reads prd.json user stories, tracks progress inline, and drives Copilot Chat to execute each story in an automated loop",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "recent-graduates",
   "repository": {
     "type": "git",
@@ -109,5 +109,6 @@
     "typescript": "^5.9.3",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2"
-  }
+  },
+  "icon": "images/ralph_runner.png"
 }
